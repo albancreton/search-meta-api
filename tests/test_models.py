@@ -59,3 +59,9 @@ def test_effective_request_has_no_params_field():
 def test_search_result_nullable_fields_default_to_none():
     r = SearchResult(title="t", url="https://x.com", snippet="s", rank=1)
     assert r.published_date is None and r.score is None and r.favicon is None
+
+
+def test_search_response_allows_no_winner():
+    from search_meta_api.models import SearchResponse
+    response = SearchResponse(query="x", results=[], elapsed_ms=12)
+    assert response.provider is None

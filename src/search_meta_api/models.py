@@ -61,7 +61,7 @@ class Attempt(BaseModel):
 
 class SearchResponse(BaseModel):
     query: str
-    provider: str
+    provider: str | None = None      # None when every provider answered emptily
     results: list[SearchResult]
     degraded: list[str] = Field(default_factory=list)
     attempts: list[Attempt] = Field(default_factory=list)
