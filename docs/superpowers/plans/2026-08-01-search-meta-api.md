@@ -867,14 +867,16 @@ async def test_unparseable_body_becomes_malformed(probe):
     with pytest.raises(ProviderError) as exc:
         await probe.request_json("GET", "https://x.test/s")
     assert exc.value.error_class is ErrorClass.MALFORMED
-
-
-def test_build_results_assigns_rank_and_truncates():
-    rows = [("t1", "u1", "s1"), ("t2", "u2", "s2"), ("t3", "u3", "s3")]
-    results = [SearchResult(title=t, url=u, snippet=s, rank=i + 1)
-               for i, (t, u, s) in enumerate(rows)][:2]
-    assert [r.rank for r in results] == [1, 2]
 ```
+
+**Amended after review (2026-08-01).** A `test_build_results_assigns_rank_and_truncates` originally sat at the end of this block. It was removed: it built a list inside the test and asserted the ranks it had just assigned, exercising nothing in `base.py`, and it named a `build_results` helper that exists nowhere in this project. Rank assignment is covered for real by every adapter's parsing tests in Tasks 6–14.
+
+Review also found four unexercised branches in this module, each now pinned by a test. Since eight adapters inherit `request_json` verbatim, these are the highest-value branches in the file:
+
+- the `scope != UNIVERSAL_SCOPE` guard — a vendor param under `*` must be dropped, never leak into passthrough
+- `if not isinstance(body, dict)` — a JSON array or scalar body is `MALFORMED`, distinct from the non-JSON case already covered
+- `except httpx.RequestError` — the original test raised `ConnectTimeout`, which the earlier `TimeoutException` clause catches, leaving the connection-error path untested; use `httpx.ConnectError`
+- `_retry_after`'s `except ValueError` — an HTTP-date `Retry-After` (RFC-legal, common on 429/503) must yield `None` rather than raising from inside error construction
 
 - [ ] **Step 2: Run test to verify it fails**
 
