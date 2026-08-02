@@ -1,0 +1,25 @@
+services:
+  search-meta-api:
+    build: .
+    image: search-meta-api
+    container_name: search-meta-api
+    restart: unless-stopped
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    labels:
+      # Landing card + liveness dot (read by the landing app)
+      landing.enable: "true"
+      landing.name: "Search Meta API"
+      landing.subdomain: "search"
+      landing.description: "Meta search API that fails over across third-party search vendors"
+      landing.group: "Tools"
+      landing.icon: "search"
+      landing.healthPath: "/health"
+      # Caddy route (read by caddy-docker-proxy)
+      caddy: search.local.alban.me
+      caddy.reverse_proxy: "{{upstreams 8000}}"
+    networks: [default, edge]
+
+networks:
+  edge:
+    external: true
