@@ -29,6 +29,13 @@ class FailoverOutcome:
     attempts: list[Attempt]
     elapsed_ms: int
     any_answer: bool = field(default=False)
+    truncated: bool = field(default=False)
+    """The chain stopped early rather than being walked to the end.
+
+    Distinct from `any_answer`: a fully-walked chain where nobody had results
+    is a final answer, whereas a truncated one leaves providers unasked. A
+    breaker skip is not truncation — the instance was still considered.
+    """
 
 
 async def run_failover(
@@ -47,6 +54,7 @@ async def run_failover(
     deadline_s = deadline_ms / 1000
     attempts: list[Attempt] = []
     any_answer = False
+    truncated = False
 
     def elapsed_ms() -> int:
         return int((clock() - started) * 1000)
@@ -60,6 +68,7 @@ async def run_failover(
         if clock() - started >= deadline_s:
             attempts.append(Attempt(provider=instance.name, outcome="skipped",
                                     reason="deadline-exceeded"))
+            truncated = True
             break
 
         if breaker.is_open(instance.name):
@@ -122,4 +131,4 @@ async def run_failover(
     # may be precisely why the answer came back empty. Report the union.
     degraded = sorted({name for a in attempts for name in a.degraded})
     return FailoverOutcome(None, [], degraded, attempts, elapsed_ms(),
-                           any_answer=any_answer)
+                           any_answer=any_answer, truncated=truncated)

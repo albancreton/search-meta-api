@@ -86,9 +86,19 @@ Response shape (abbreviated):
     {"provider": "tinyfish-free", "outcome": "empty", "status": 200, "ms": 480},
     {"provider": "tavily-b", "outcome": "success", "status": 200, "ms": 640, "degraded": ["language"]}
   ],
-  "elapsed_ms": 1452
+  "elapsed_ms": 1452,
+  "truncated": false
 }
 ```
+
+`truncated` is `true` when the chain stopped early instead of being walked
+to the end — today that means only one thing, the request deadline fired.
+**Check it before concluding a query has no answers.** Without it, a
+deadline stop after an early empty answer is byte-identical to "every
+provider was asked and nobody had results": the same `200`, the same
+`provider: null`, the same `results: []`. It stays a `200` either way,
+because an empty answer is a legitimate outcome; `truncated` is the flag
+that separates "asked everyone" from "ran out of time".
 
 `GET /providers` lists the configured chain, its order, each instance's
 capabilities, and current breaker state. `GET /docs` is FastAPI's generated
@@ -199,13 +209,17 @@ dropped matters most.
 
 ```
 for instance in configured_order:
-    if deadline_exceeded():              → stop, return 503
+    if deadline_exceeded():              → record skipped (reason
+                                           "deadline-exceeded"), set
+                                           truncated, stop walking
     if breaker.is_open(instance):        → record skipped, continue
     try:
         results = await instance.search(request)
     except ProviderError as e:           → record error, breaker.fault(e), continue
-    if len(results) == 0:                → record empty, no breaker fault, continue
-    breaker.success(instance)
+    breaker.success(instance)            # BEFORE the empty check: an empty
+                                         # answer is a healthy response and
+                                         # actively heals the breaker
+    if len(results) == 0:                → record empty, continue
     return results
 return 200 with results: [] if any provider answered emptily,
        else 503 if every provider errored or was skipped
@@ -245,7 +259,12 @@ provider once, which is cheap and correct, so nothing is persisted to disk.
 **Timeouts:** a per-provider timeout (`defaults.timeout_ms`, overridable per
 instance) and a whole-request deadline (`server.request_deadline_ms`). The
 deadline is checked before each new attempt starts, not enforced mid-flight,
-so a request can overshoot it by up to one adapter's own timeout.
+so a request can overshoot it by up to one adapter's own timeout. When it
+fires, the remaining providers are left unasked, the last `attempts` entry
+records `reason: "deadline-exceeded"`, and the response's top-level
+`truncated` is `true` — the status is whatever the answer so far deserves
+(`200` if any provider answered, `503` if none did), never a `503` purely
+on account of the deadline.
 
 ## Adding a provider
 

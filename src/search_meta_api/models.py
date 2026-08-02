@@ -66,6 +66,17 @@ class SearchResponse(BaseModel):
     degraded: list[str] = Field(default_factory=list)
     attempts: list[Attempt] = Field(default_factory=list)
     elapsed_ms: int
+    truncated: bool = Field(
+        default=False,
+        description=(
+            "True when the chain stopped early instead of being walked to the "
+            "end — today, only because the request deadline fired. Without it, "
+            "a deadline stop after an early empty answer is byte-identical to "
+            "'every provider was asked and nobody had results': same 200, same "
+            "null provider, same empty results. Check it before concluding a "
+            "query has no answers."
+        ),
+    )
 
 
 UNIFIED_FIELDS: frozenset[str] = frozenset(UnifiedFilters.model_fields) - {"query"}

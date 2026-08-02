@@ -1,3 +1,5 @@
+import asyncio
+
 import httpx
 
 from search_meta_api.app import create_app
@@ -65,6 +67,46 @@ async def test_all_empty_is_a_200_with_no_winner():
     body = response.json()
     assert body["provider"] is None
     assert body["results"] == []
+
+
+async def test_a_deadline_truncated_chain_is_flagged_truncated():
+    """A deadline stop after an early empty answer used to be byte-identical to
+    "nobody has results": 200, provider null, results []. The truth was buried
+    in attempts[].reason. An agent reading `results` and `provider` concluded
+    the query has no answers and stopped, when most of the chain was never
+    asked. `truncated` is what distinguishes the two.
+    """
+    settings = Settings(server={"request_deadline_ms": 1},
+                        providers=[{"name": "a", "type": "tavily", "api_key": "k"}])
+
+    class Slow(Fake):
+        async def search(self, req, passthrough):
+            await asyncio.sleep(0.02)
+            return []
+
+    app = create_app(settings, instances=[
+        ProviderInstance("a", Slow("a", [])),
+        hit("b", [("Cats", "https://a.com")]),
+    ])
+    response = await call(app, json={"query": "cats"})
+    assert response.status_code == 200        # an empty answer is still legitimate
+    body = response.json()
+    assert body["provider"] is None
+    assert body["results"] == []
+    assert body["truncated"] is True
+    assert body["attempts"][-1]["reason"] == "deadline-exceeded"
+
+
+async def test_a_fully_walked_chain_is_not_flagged_truncated():
+    app = create_app(SETTINGS_NO_AUTH, instances=[hit("a", []), hit("b", [])])
+    body = (await call(app, json={"query": "cats"})).json()
+    assert body["provider"] is None and body["results"] == []
+    assert body["truncated"] is False
+
+
+async def test_a_successful_answer_is_not_flagged_truncated():
+    app = create_app(SETTINGS_NO_AUTH, instances=[hit("a", [("Cats", "https://a.com")])])
+    assert (await call(app, json={"query": "cats"})).json()["truncated"] is False
 
 
 async def test_dropped_filters_are_reported_even_when_no_provider_had_results():

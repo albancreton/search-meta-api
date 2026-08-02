@@ -112,6 +112,7 @@ def create_app(
             degraded=outcome.degraded,
             attempts=outcome.attempts,
             elapsed_ms=outcome.elapsed_ms,
+            truncated=outcome.truncated,
         )
 
     @app.get("/health")

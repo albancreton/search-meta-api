@@ -200,17 +200,29 @@ never becomes a vendor 400 halfway down the chain.
 
 ```
 for instance in configured_order:
-    if deadline_exceeded():              → stop, return 503
+    if deadline_exceeded():              → record skipped (reason
+                                           "deadline-exceeded"), set
+                                           truncated, stop walking
     if breaker.is_open(instance):        → record skipped, continue
     try:
         results = await instance.search(request)
     except ProviderError as e:           → record error, breaker.fault(e), continue
-    if len(results) == 0:                → record empty, no breaker fault, continue
-    breaker.success(instance)
+    breaker.success(instance)            # BEFORE the empty check, deliberately:
+                                         # an empty answer is a well-formed
+                                         # response from a healthy provider, so
+                                         # it heals the breaker like any other
+    if len(results) == 0:                → record empty, continue
     return results
 return 200 with results: [] if any provider answered emptily,
        else 503 if every provider errored or was skipped
 ```
+
+The deadline check comes first in the loop body, before the breaker check, and
+that ordering is load-bearing: `breaker.is_open()` is side-effecting — for a
+HALF_OPEN instance it consumes the single probe token — so checking it and then
+breaking on the deadline would abandon the token with nothing left to release
+it, blackholing a recovering provider permanently. For the same reason the
+router releases the token explicitly if the request is cancelled mid-attempt.
 
 **Success** is a well-formed response with **at least one result**. An empty
 result set is not a fault — the provider is healthy, it just found nothing — so
@@ -256,8 +268,21 @@ re-probing every provider once is cheap and correct.
 ### Timeouts
 
 Per-provider timeout (default 10 000 ms, overridable per instance) and a
-whole-request deadline (default 30 000 ms). Exceeding the deadline mid-chain
-returns 503 with the attempts recorded so far rather than blocking unboundedly.
+whole-request deadline (default 30 000 ms).
+
+The deadline is **best-effort**, not a hard cut-off. It is checked before each
+new attempt starts and never interrupts an attempt already in flight, so a
+request can overshoot it by up to one adapter's own timeout. What bounds a
+request in practice is the per-provider timeout; the deadline bounds how many
+more providers are tried.
+
+Exceeding it mid-chain stops the walk, records a final `skipped` attempt with
+`reason: "deadline-exceeded"`, and sets the response's top-level `truncated`
+flag. It does **not** by itself change the status code: if some provider
+already answered, that is still a `200` (with `results: []` if the answer was
+empty) — the `truncated` flag, not the status, is what tells a caller the chain
+was cut short. A `503` still means only that no provider produced a well-formed
+response at all.
 
 ## 9. Response schema
 
@@ -284,7 +309,8 @@ returns 503 with the attempts recorded so far rather than blocking unboundedly.
     {"provider":"tavily-b","outcome":"success","status":200,"ms":640,
      "degraded":["language"]}
   ],
-  "elapsed_ms": 1452
+  "elapsed_ms": 1452,
+  "truncated": false            // chain stopped early rather than fully walked
 }
 ```
 
@@ -299,6 +325,16 @@ every provider answered emptily, so `provider` is `null` — it is the sorted,
 deduplicated union of every attempt's list instead: an empty answer is exactly
 when a caller most needs to know a filter was dropped, since the drop may be why
 the answer was empty.
+
+`truncated` is `true` when the chain stopped early instead of being walked to
+the end — today, only because the request deadline fired. It exists because
+without it a deadline stop after an early empty answer is indistinguishable
+from a genuine no-results answer: same `200`, same `provider: null`, same
+`results: []`, with the truth buried in `attempts[].reason`. An agent reading
+`results` and `provider` would conclude the query has no answers and stop, when
+most of the chain was never asked. The status stays `200` — an empty answer is
+a legitimate outcome — and this flag is what separates "asked everyone, no
+results" from "ran out of time".
 
 `attempts` is the entire observability story. No external tracing is needed to
 answer "why was that slow", "which key is dead", or "why did filtering look

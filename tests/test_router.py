@@ -146,6 +146,31 @@ async def test_deadline_stops_the_chain_mid_walk():
     # Exactly 3 attempts: "a" errors, "b" errors, "c" is skipped for the
     # deadline, and the loop stops there — "d" is never attempted.
     assert len(out.attempts) == 3
+    assert out.truncated is True
+
+
+async def test_a_fully_walked_chain_is_not_truncated():
+    out = await run(["a", "b"], {"a": [], "b": []})
+    assert out.winner is None
+    assert out.truncated is False
+
+
+async def test_a_winning_outcome_is_not_truncated():
+    out = await run(["a", "b"], {"a": ["r1"], "b": ["r2"]})
+    assert out.truncated is False
+
+
+async def test_a_chain_ending_in_breaker_skips_is_not_truncated():
+    """Skipping an open breaker is not truncation: the chain was still walked to
+    the end, every provider was considered, and the answer is final.
+    """
+    clock = FakeClock()
+    breaker = make_breaker(clock)
+    breaker.record_fault("b", ErrorClass.TRANSIENT)
+    out = await run(["a", "b"], {"a": [], "b": ["r2"]}, clock=clock, breaker=breaker)
+    assert out.winner is None
+    assert out.attempts[-1].reason == "breaker-open"
+    assert out.truncated is False
 
 
 async def test_attempts_record_elapsed_milliseconds():
