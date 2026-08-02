@@ -46,6 +46,13 @@ def resolve_request(
 
     Returns the effective unified request, the raw vendor passthrough params,
     and the sorted list of requested filters this provider cannot honour.
+
+    The returned `degraded` list covers only static capability gaps — filters
+    absent from `capabilities.supported_filters`. It says nothing about
+    value-dependent gaps (e.g. a freshness window the vendor doesn't offer for
+    this particular value); those are covered separately by
+    `adapter.extra_degraded(effective)`. Callers must merge both lists to get
+    the full picture for a given request.
     """
     values = req.model_dump(exclude={"params"})
     passthrough: dict[str, Any] = {}

@@ -3,7 +3,7 @@ import pytest
 import respx
 
 from search_meta_api.errors import ErrorClass, ProviderError
-from search_meta_api.models import SearchRequest, SearchResult
+from search_meta_api.models import SearchRequest
 from search_meta_api.providers.base import (
     Adapter, Capabilities, domain_operators, resolve_request,
 )
@@ -43,13 +43,20 @@ def test_instance_scope_beats_type_scope():
 
 
 def test_other_instances_scope_is_ignored():
-    eff, _, _ = resolve(SearchRequest(query="hi", params={"tavily-a/max_results": 3}))
+    eff, passthrough, _ = resolve(SearchRequest(query="hi", params={"tavily-a/max_results": 3}))
     assert eff.max_results == 10
+    assert passthrough == {}
 
 
 def test_max_results_is_clamped_to_the_provider_cap():
-    eff, _, _ = resolve(SearchRequest(query="hi", max_results=100))
+    eff, _, degraded = resolve(SearchRequest(query="hi", max_results=100))
     assert eff.max_results == 20
+    assert degraded == []
+
+
+def test_universal_scope_passthrough_param_is_dropped():
+    _, passthrough, _ = resolve(SearchRequest(query="hi", params={"*/search_depth": "advanced"}))
+    assert passthrough == {}
 
 
 def test_scoped_vendor_params_become_passthrough():
@@ -165,6 +172,14 @@ async def test_timeout_becomes_a_transient_error(probe):
 
 
 @respx.mock
+async def test_connection_error_becomes_a_transient_error(probe):
+    respx.get("https://x.test/s").mock(side_effect=httpx.ConnectError("down"))
+    with pytest.raises(ProviderError) as exc:
+        await probe.request_json("GET", "https://x.test/s")
+    assert exc.value.error_class is ErrorClass.TRANSIENT
+
+
+@respx.mock
 async def test_unparseable_body_becomes_malformed(probe):
     respx.get("https://x.test/s").mock(return_value=httpx.Response(200, text="<html>"))
     with pytest.raises(ProviderError) as exc:
@@ -172,8 +187,19 @@ async def test_unparseable_body_becomes_malformed(probe):
     assert exc.value.error_class is ErrorClass.MALFORMED
 
 
-def test_build_results_assigns_rank_and_truncates():
-    rows = [("t1", "u1", "s1"), ("t2", "u2", "s2"), ("t3", "u3", "s3")]
-    results = [SearchResult(title=t, url=u, snippet=s, rank=i + 1)
-               for i, (t, u, s) in enumerate(rows)][:2]
-    assert [r.rank for r in results] == [1, 2]
+@respx.mock
+async def test_json_array_body_becomes_malformed(probe):
+    respx.get("https://x.test/s").mock(return_value=httpx.Response(200, json=[1, 2, 3]))
+    with pytest.raises(ProviderError) as exc:
+        await probe.request_json("GET", "https://x.test/s")
+    assert exc.value.error_class is ErrorClass.MALFORMED
+
+
+@respx.mock
+async def test_retry_after_http_date_is_ignored(probe):
+    respx.get("https://x.test/s").mock(
+        return_value=httpx.Response(
+            429, headers={"Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"}, json={}))
+    with pytest.raises(ProviderError) as exc:
+        await probe.request_json("GET", "https://x.test/s")
+    assert exc.value.retry_after_s is None
