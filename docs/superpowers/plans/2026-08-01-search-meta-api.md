@@ -4370,7 +4370,19 @@ WORKDIR /app
 
 COPY pyproject.toml ./
 COPY src/ ./src/
-RUN pip install --no-cache-dir .
+# rm -rf build/ in the same layer: the setuptools backend leaves a second full
+# copy of every module there, and deleting it in a later layer would not shrink
+# the image.
+RUN pip install --no-cache-dir . && rm -rf /app/build
+
+# Nothing here needs privileges — it binds one port, reads one read-only
+# bind-mounted file, and makes outbound HTTPS calls. Fixed high UID so the
+# numeric owner stays stable across rebuilds, which matters because config.yaml
+# arrives from the host.
+RUN groupadd --gid 10001 appuser \
+    && useradd --uid 10001 --gid appuser --no-create-home --shell /usr/sbin/nologin appuser \
+    && chown -R appuser:appuser /app
+USER appuser
 
 EXPOSE 8000
 ENV CONFIG_PATH=/app/config.yaml
