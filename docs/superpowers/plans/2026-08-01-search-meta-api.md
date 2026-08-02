@@ -3473,14 +3473,32 @@ class GoogleCseAdapter(Adapter):
         return self._parse(body, req.max_results)
 
     def classify(self, response: httpx.Response) -> ErrorClass:
-        """A 403 is either a bad key or an exhausted quota — the body decides."""
+        """A 403 is either a bad key or an exhausted quota — the body decides.
+
+        This must be total: it is called from inside `request_json`'s error
+        path, so anything raised here escapes as an unhandled error and the
+        router records a misleading MALFORMED instead of parking the provider
+        for a quota cooldown or logging a dead key. Every unexpected shape
+        therefore falls back to AUTH rather than trusting the body's structure.
+        """
         if response.status_code != 403:
             return classify_status(response.status_code)
         try:
-            errors = (response.json().get("error") or {}).get("errors") or []
+            body = response.json()
         except ValueError:
             return ErrorClass.AUTH
-        if any(entry.get("reason") in QUOTA_REASONS for entry in errors):
+        if not isinstance(body, dict):
+            return ErrorClass.AUTH
+        error = body.get("error")
+        if not isinstance(error, dict):
+            return ErrorClass.AUTH
+        errors = error.get("errors")
+        if not isinstance(errors, list):
+            return ErrorClass.AUTH
+        if any(
+            isinstance(entry, dict) and entry.get("reason") in QUOTA_REASONS
+            for entry in errors
+        ):
             return ErrorClass.QUOTA
         return ErrorClass.AUTH
 
