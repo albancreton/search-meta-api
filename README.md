@@ -168,7 +168,12 @@ the shared name is coincidence, not a translation.
 
 ² Tavily gates `safe_search` to enterprise plans; sending it on a standard
 key risks a 400 on every request, so it isn't translated automatically.
-Reachable as `tavily/safe_search` passthrough for enterprise keys.
+**It is not reachable through this API at all**, by any spelling.
+`safe_search` is a unified field name, and a `params` key naming a unified
+field is always treated as a scoped unified override, never as passthrough
+— so `tavily/safe_search` is translated (and, since Tavily doesn't support
+the filter, dropped and reported in `degraded`) rather than forwarded. If
+you have an enterprise key and need it, call Tavily directly.
 
 `include_domains`/`exclude_domains` for google_cse and searxng are
 genuinely honoured, not dropped — both fold domains into the query as

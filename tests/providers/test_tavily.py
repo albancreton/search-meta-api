@@ -149,3 +149,6 @@ def test_capabilities():
     assert "language" not in caps.supported_filters
     assert "safe_search" not in caps.supported_filters   # enterprise-gated
     assert "search_depth" in caps.passthrough_params
+    # `safe_search` is a unified field name, so it can never become passthrough
+    # (see test_no_adapter_advertises_an_unreachable_passthrough_param).
+    assert "safe_search" not in caps.passthrough_params

@@ -3,7 +3,7 @@ import pytest
 import respx
 
 from search_meta_api.errors import ErrorClass, ProviderError
-from search_meta_api.models import SearchRequest, SearchResult
+from search_meta_api.models import UNIFIED_FIELDS, SearchRequest, SearchResult
 from search_meta_api.providers.base import (
     Adapter,
     Capabilities,
@@ -11,6 +11,7 @@ from search_meta_api.providers.base import (
     domain_operators,
     resolve_request,
 )
+from search_meta_api.providers.registry import ADAPTERS
 
 CAPS = Capabilities(
     supported_filters=frozenset({"include_domains", "freshness", "country", "topic"}),
@@ -181,6 +182,22 @@ def test_extra_degraded_can_be_overridden_for_value_dependent_gaps():
     picky = Picky("p", httpx.AsyncClient())
     assert picky.extra_degraded(SearchRequest(query="hi", freshness="week")) == ["freshness"]
     assert picky.extra_degraded(SearchRequest(query="hi", freshness="day")) == []
+
+
+@pytest.mark.parametrize("type_name", sorted(ADAPTERS))
+def test_no_adapter_advertises_an_unreachable_passthrough_param(type_name):
+    """A passthrough param may not share a name with a unified field.
+
+    Both `validate_params` and `resolve_request` test `name in UNIFIED_FIELDS`
+    *before* the passthrough branch, so such a param is unreachable by
+    construction — a `<scope>/<name>` key always becomes a scoped unified
+    override instead, and if the adapter's `supported_filters` excludes that
+    field the value is dropped and reported as degraded. Declaring one is a
+    false capability claim, and `GET /providers` publishes it to agents as
+    fact. Tavily's `safe_search` was exactly this.
+    """
+    collisions = set(ADAPTERS[type_name].capabilities.passthrough_params) & UNIFIED_FIELDS
+    assert collisions == set()
 
 
 class _Probe(Adapter):

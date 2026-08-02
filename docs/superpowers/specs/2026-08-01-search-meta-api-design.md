@@ -140,7 +140,14 @@ the shared name is coincidence, not a translation.
 
 ² Tavily gates `safe_search` to enterprise plans; sending it on a standard
 key risks a 400 on every request, so it is not translated automatically.
-Reachable as `tavily/safe_search` passthrough for enterprise keys.
+**It is not reachable through this API at all**, by any spelling.
+`safe_search` is a unified field name, and §7's precedence rules match
+unified names before the passthrough branch, so `tavily/safe_search` is a
+scoped unified override — translated, then dropped and reported in
+`degraded` because Tavily's `supported_filters` excludes it. There is no
+workaround short of calling Tavily directly. An adapter must therefore
+never declare a `passthrough_params` entry whose name is a unified field:
+it would be unreachable, and `GET /providers` would advertise it anyway.
 
 `include_domains`/`exclude_domains` for google_cse and searxng are genuinely
 honoured, not dropped — both fold domains into the query as `site:`/`-site:`

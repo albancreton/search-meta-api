@@ -35,7 +35,12 @@ class TavilyAdapter(Adapter):
             "include_favicon": bool,
             "auto_parameters": bool,
             "exact_match": bool,
-            "safe_search": bool,
+            # No "safe_search" entry, deliberately. It is a unified field name,
+            # and both validate_params and resolve_request match unified names
+            # before the passthrough branch — so `tavily/safe_search` could
+            # never become passthrough, it only ever became a scoped unified
+            # override that this adapter then dropped as degraded. Declaring it
+            # made GET /providers advertise a capability that does not exist.
             "include_usage": bool,
         },
     )
