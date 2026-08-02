@@ -1,0 +1,18 @@
+.venv/
+.git/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+docs/
+tests/
+
+# Every YAML in the build context, by name and by glob. config.yaml and
+# keys.yaml hold live third-party API keys; both are bind-mounted at runtime
+# and neither is ever needed at build time. The Dockerfile currently copies
+# only pyproject.toml and src/, so this is belt-and-braces — but one future
+# `COPY . .` would otherwise bake live keys into an image layer, where they
+# survive every later `rm` and travel with every `docker push`.
+config.yaml
+keys.yaml
+*.yaml
+*.yml

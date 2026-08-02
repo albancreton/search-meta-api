@@ -122,16 +122,42 @@ per-vendor detail in the research doc):
 |---|---|---|---|---|---|---|---|---|
 | `query` | `query` | `q` | `query` | `q` | `query` | `query` | `q` | `q` |
 | `max_results` | `max_results` ≤20 | `count` ≤20 | `numResults` ≤100 | `maxResults` | `limit` ≤100 | — | `num` ≤10 | — |
-| `include_domains` | `include_domains` | `site:` ops | `includeDomains` | `includeDomains` | `includeDomains` | — | `siteSearch`+`i` (1 only) | — |
-| `exclude_domains` | `exclude_domains` | `-site:` ops | `excludeDomains` | `excludeDomains` | `excludeDomains` | — | `siteSearch`+`e` (1 only) | — |
+| `include_domains` | `include_domains` | `site:` ops | `includeDomains` | `includeDomains` | `includeDomains` | — | `site:` ops | `site:` ops |
+| `exclude_domains` | `exclude_domains` | `-site:` ops | `excludeDomains` | `excludeDomains` | `-site:` ops | — | `-site:` ops | `-site:` ops |
 | `freshness` | `time_range` | `freshness` | — | — | `tbs=qdr:*` | `recency_minutes` | `dateRestrict` | `time_range` |
 | `start/end_date` | `start_date`/`end_date` | `freshness` range | `startPublishedDate`/… | `fromDate`/`toDate` | — | `after_date`/`before_date` | — | — |
-| `country` | `country` | `country` | `userLocation` | — | `country` | `location` | `gl` | — |
+| `country` | `country` | `country` | `userLocation` | — | `country` | —¹ | `gl` | — |
 | `language` | — | `search_lang` | — | — | — | `language` | `lr` | `language` |
-| `safe_search` | `safe_search` | `safesearch` | `moderation` | — | — | — | `safe` | `safesearch` |
+| `safe_search` | —² | `safesearch` | `moderation` | — | — | — | `safe` | `safesearch` |
 | `topic` | `topic` | — | `category` | — | `sources` | `domain_type` | — | `categories` |
 
 Where a cell is `—`, the adapter drops that filter and reports it (§9).
+
+¹ TinyFish's `location` passthrough parameter takes region identifiers, not
+ISO country codes — guessing a mapping from `country` would mislead callers,
+so it is not translated. Reachable only as `tinyfish/location` passthrough;
+the shared name is coincidence, not a translation.
+
+² Tavily gates `safe_search` to enterprise plans; sending it on a standard
+key risks a 400 on every request, so it is not translated automatically.
+**It is not reachable through this API at all**, by any spelling.
+`safe_search` is a unified field name, and §7's precedence rules match
+unified names before the passthrough branch, so `tavily/safe_search` is a
+scoped unified override — translated, then dropped and reported in
+`degraded` because Tavily's `supported_filters` excludes it. There is no
+workaround short of calling Tavily directly. An adapter must therefore
+never declare a `passthrough_params` entry whose name is a unified field:
+it would be unreachable, and `GET /providers` would advertise it anyway.
+
+`include_domains`/`exclude_domains` for google_cse and searxng are genuinely
+honoured, not dropped — both fold domains into the query as `site:`/`-site:`
+search operators (`domain_operators`), the same mechanism Brave uses, rather
+than a dedicated API parameter: Google's `siteSearch` only accepts a single
+domain, so operators do the work instead and support any number of domains.
+Firecrawl treats the two directions differently: `include_domains` goes
+through as a real `includeDomains` parameter, but `exclude_domains` is
+folded into the query as `-site:` operators instead, because the vendor's
+`includeDomains` and `excludeDomains` parameters are mutually exclusive.
 
 ## 7. Namespaced parameters
 
@@ -156,14 +182,27 @@ precedence levels. Supplying both `country: "fr"` and `params: {"*/country":
 
 **The two scope kinds behave differently, and that is the point.**
 
-- A `*/` (or flat) parameter goes through the translation table. It is
-  **best-effort**: dropped for any provider with no equivalent, and that drop is
-  reported in the response.
-- A scoped parameter is **literal passthrough** to that vendor's API. It only
-  ever reaches a provider that has the parameter, so the "can't honour it" case
-  cannot arise. It is also the escape hatch to every vendor's power features —
-  Exa's `type`, Tavily's `search_depth`, Firecrawl's `scrapeOptions` — without
-  any of them polluting the unified schema.
+**What decides the handling is the parameter's NAME, not its scope.**
+
+- A parameter whose name is a **unified field** goes through the translation
+  table, in *every* scope including `<type>` and `<instance name>`. It is
+  **best-effort**: validated against the unified type, clamped where the
+  provider caps it, dropped for any provider with no equivalent, and that drop
+  reported in the response's `degraded`. `tavily-b/max_results` is not raw — it
+  is the unified `max_results` retargeted at one instance.
+- A parameter whose name is in that adapter's `passthrough_params` is
+  **literal passthrough** to the vendor's API. Only a `<type>` or
+  `<instance name>` scope can produce one; a `*/` key never becomes
+  passthrough. It is the escape hatch to every vendor's power features — Exa's
+  `type`, Tavily's `search_depth`, Firecrawl's `scrapeOptions` — without any of
+  them polluting the unified schema.
+
+The unified branch is matched **first**, so the two sets must stay disjoint: a
+`passthrough_params` entry whose name is a unified field is unreachable by
+construction, while `GET /providers` would still advertise it. (An earlier
+draft of this section claimed the "can't honour it" case cannot arise for a
+scoped parameter. That was wrong for exactly this reason, and Tavily's
+`safe_search` was the case that proved it — see §6 footnote ².)
 
 **Validation is at the edge.** Each adapter declares `passthrough_params` as a
 name → type map. An unknown parameter name, a wrong type, or a scope naming no
@@ -174,17 +213,29 @@ never becomes a vendor 400 halfway down the chain.
 
 ```
 for instance in configured_order:
+    if deadline_exceeded():              → record skipped (reason
+                                           "deadline-exceeded"), set
+                                           truncated, stop walking
     if breaker.is_open(instance):        → record skipped, continue
-    if deadline_exceeded():              → stop, return 503
     try:
         results = await instance.search(request)
     except ProviderError as e:           → record error, breaker.fault(e), continue
-    if len(results) == 0:                → record empty, no breaker fault, continue
-    breaker.success(instance)
+    breaker.success(instance)            # BEFORE the empty check, deliberately:
+                                         # an empty answer is a well-formed
+                                         # response from a healthy provider, so
+                                         # it heals the breaker like any other
+    if len(results) == 0:                → record empty, continue
     return results
 return 200 with results: [] if any provider answered emptily,
        else 503 if every provider errored or was skipped
 ```
+
+The deadline check comes first in the loop body, before the breaker check, and
+that ordering is load-bearing: `breaker.is_open()` is side-effecting — for a
+HALF_OPEN instance it consumes the single probe token — so checking it and then
+breaking on the deadline would abandon the token with nothing left to release
+it, blackholing a recovering provider permanently. For the same reason the
+router releases the token explicitly if the request is cancelled mid-attempt.
 
 **Success** is a well-formed response with **at least one result**. An empty
 result set is not a fault — the provider is healthy, it just found nothing — so
@@ -202,9 +253,14 @@ router is the provider's problem, not the caller's. There is therefore no
 |---|---|---|---|
 | `TRANSIENT` | 5xx, 408, connect/read timeout | fault | standard |
 | `AUTH` | 401, 403 | fault | standard, logged at ERROR — a dead key needs a human |
-| `QUOTA` | 402, 429, 432, 433, Google `dailyLimitExceeded`/`rateLimitExceeded` | fault | **extended** — guaranteed to fail again |
+| `QUOTA` | 402, 429, 432, 433, Google `dailyLimitExceeded`/`rateLimitExceeded` | fault — **opens the breaker immediately**, bypassing `fault_threshold` | **extended** — guaranteed to fail again |
 | `MALFORMED` | 200 but unparseable; Firecrawl `success: false`; unexpected 400 | fault | standard |
-| `EMPTY` | 200, zero results | **no fault** | — |
+
+Those four are the entire `ErrorClass` enum. An empty result set is **not** an
+error class: a 200 with zero results produces an attempt with
+`outcome: "empty"` and `error_class: null`, and calls `breaker.record_success`
+— it heals the breaker rather than merely not faulting it, because a
+well-formed empty answer is proof the provider is healthy.
 
 Tavily's 432 (plan limit) and 433 (pay-as-you-go cap) are distinct from 429 and
 all three classify as `QUOTA`. SearXNG's 403 (`format: json` not enabled in
@@ -216,7 +272,9 @@ error, not a transient one.
 Per provider **instance** — `tavily-a` and `tavily-b` are independent despite
 sharing an adapter.
 
-- `closed` → 3 consecutive faults → `open`
+- `closed` → 3 consecutive faults → `open` — except a single `QUOTA` fault
+  opens it immediately, bypassing `fault_threshold` entirely: a quota error
+  is guaranteed to recur, so there is nothing to learn from two more tries
 - `open` → skipped entirely; after the cooldown → `half-open`
 - `half-open` → admits exactly one probe; success → `closed`, fault → `open`
 - Cooldown: 60s standard, 300s for `QUOTA`, or the vendor's `Retry-After` when
@@ -228,8 +286,21 @@ re-probing every provider once is cheap and correct.
 ### Timeouts
 
 Per-provider timeout (default 10 000 ms, overridable per instance) and a
-whole-request deadline (default 30 000 ms). Exceeding the deadline mid-chain
-returns 503 with the attempts recorded so far rather than blocking unboundedly.
+whole-request deadline (default 30 000 ms).
+
+The deadline is **best-effort**, not a hard cut-off. It is checked before each
+new attempt starts and never interrupts an attempt already in flight, so a
+request can overshoot it by up to one adapter's own timeout. What bounds a
+request in practice is the per-provider timeout; the deadline bounds how many
+more providers are tried.
+
+Exceeding it mid-chain stops the walk, records a final `skipped` attempt with
+`reason: "deadline-exceeded"`, and sets the response's top-level `truncated`
+flag. It does **not** by itself change the status code: if some provider
+already answered, that is still a `200` (with `results: []` if the answer was
+empty) — the `truncated` flag, not the status, is what tells a caller the chain
+was cut short. A `503` still means only that no provider produced a well-formed
+response at all.
 
 ## 9. Response schema
 
@@ -250,13 +321,14 @@ returns 503 with the attempts recorded so far rather than blocking unboundedly.
   ],
   "degraded": ["language"],       // filters this provider could not honour
   "attempts": [
-    {"provider":"tavily-a","outcome":"error","class":"QUOTA","status":432,"ms":210},
+    {"provider":"tavily-a","outcome":"error","error_class":"QUOTA","status":432,"ms":210},
     {"provider":"tinyfish","outcome":"empty","status":200,"ms":480},
     {"provider":"brave","outcome":"skipped","reason":"breaker-open"},
     {"provider":"tavily-b","outcome":"success","status":200,"ms":640,
      "degraded":["language"]}
   ],
-  "elapsed_ms": 1452
+  "elapsed_ms": 1452,
+  "truncated": false            // chain stopped early rather than fully walked
 }
 ```
 
@@ -266,17 +338,43 @@ from result order, since only TinyFish returns an explicit `position`.
 
 Top-level `degraded` is the winning attempt's `degraded` list, hoisted so a
 caller never has to scan `attempts` to learn the answer was loosely filtered. It
-is always present, `[]` when nothing was dropped.
+is always present, `[]` when nothing was dropped. When there is no winner —
+every provider answered emptily, so `provider` is `null` — it is the sorted,
+deduplicated union of every attempt's list instead: an empty answer is exactly
+when a caller most needs to know a filter was dropped, since the drop may be why
+the answer was empty.
+
+`truncated` is `true` when the chain stopped early instead of being walked to
+the end — today, only because the request deadline fired. It exists because
+without it a deadline stop after an early empty answer is indistinguishable
+from a genuine no-results answer: same `200`, same `provider: null`, same
+`results: []`, with the truth buried in `attempts[].reason`. An agent reading
+`results` and `provider` would conclude the query has no answers and stop, when
+most of the chain was never asked. The status stays `200` — an empty answer is
+a legitimate outcome — and this flag is what separates "asked everyone, no
+results" from "ran out of time".
 
 `attempts` is the entire observability story. No external tracing is needed to
 answer "why was that slow", "which key is dead", or "why did filtering look
 loose".
 
-Error response (503, every provider failed):
+Error response (503, every provider failed). It is raised as a FastAPI
+`HTTPException`, so the payload is **nested under `detail`** — a caller reading
+`response["attempts"]` on a 503 gets a `KeyError`:
 
 ```jsonc
-{ "error": "all_providers_failed", "query": "…", "attempts": [ … ], "elapsed_ms": 8210 }
+{
+  "detail": {
+    "error": "all_providers_failed",
+    "query": "…",
+    "attempts": [ … ],
+    "elapsed_ms": 8210
+  }
+}
 ```
+
+`truncated` is a field of the 200 response only. On a 503 the equivalent signal
+is a final `attempts` entry with `reason: "deadline-exceeded"`.
 
 ## 10. Configuration
 
@@ -298,15 +396,17 @@ breaker:
   quota_cooldown_ms: 300000
 
 providers:
-  - {name: tavily-a, type: tavily,     api_key: "tvly-AAAAA"}
-  - {name: tavily-b, type: tavily,     api_key: "tvly-BBBBB", timeout_ms: 15000}
-  - {name: tinyfish, type: tinyfish,   api_key: "XXXXX"}
-  - {name: brave,    type: brave,      api_key: "BSA…"}
-  - {name: exa,      type: exa,        api_key: "…"}
-  - {name: linkup,   type: linkup,     api_key: "…"}
-  - {name: firecrawl,type: firecrawl,  api_key: "fc-…"}
-  - {name: google,   type: google_cse, api_key: "…", cx: "…"}
-  - {name: searxng,  type: searxng,    base_url: "https://xng.xmpl.me"}
+  # An instance `name` must never equal a provider `type` name — see below.
+  # These match config.example.yaml, which is the authoritative template.
+  - {name: tavily-a,           type: tavily,     api_key: "tvly-AAAAA"}
+  - {name: tavily-b,           type: tavily,     api_key: "tvly-BBBBB", timeout_ms: 15000}
+  - {name: tinyfish-free,      type: tinyfish,   api_key: "XXXXX"}
+  - {name: brave-web,          type: brave,      api_key: "BSA…"}
+  - {name: exa-web,            type: exa,        api_key: "…"}
+  - {name: linkup-web,         type: linkup,     api_key: "…"}
+  - {name: firecrawl-search,   type: firecrawl,  api_key: "fc-…"}
+  - {name: google,             type: google_cse, api_key: "…", cx: "…"}
+  - {name: searxng-selfhosted, type: searxng,    base_url: "https://xng.xmpl.me"}
 ```
 
 `config.yaml` is gitignored; `config.example.yaml` ships with placeholders. The
@@ -315,7 +415,14 @@ a duplicate instance name, or a missing required field — a misconfigured
 provider must not become a silent runtime failure.
 
 Instance names must not collide with type names, so that a scope prefix is
-never ambiguous. The loader enforces this.
+never ambiguous. The loader enforces this and refuses to boot on a collision —
+which is why the example above cannot use bare `tinyfish`, `brave`, `exa`,
+`linkup`, `firecrawl` or `searxng` as instance names.
+
+`auth_token`, if set, must be ASCII-only: it is compared byte-for-byte against
+an `Authorization` header, and HTTP headers cannot carry anything else, so a
+non-ASCII token could never be matched by any client. The loader rejects one
+rather than booting a service where every request fails.
 
 ## 11. API surface
 
@@ -324,12 +431,27 @@ never ambiguous. The loader enforces this.
 | POST | `/search` | the search request (§6) |
 | GET | `/health` | liveness + per-instance breaker state |
 | GET | `/providers` | configured instances, order, capabilities, breaker state |
-| GET | `/docs` | FastAPI OpenAPI — the agent-facing tool schema |
+| GET | `/docs`, `/redoc`, `/openapi.json` | FastAPI OpenAPI — the agent-facing tool schema |
 
-**Auth:** optional static bearer token from `server.auth_token`. When set, every
-endpoint except `/health` requires `Authorization: Bearer <token>`. When unset,
+**Auth:** optional static bearer token from `server.auth_token`. When set,
+`/search` and `/providers` require `Authorization: Bearer <token>`. When unset,
 auth is disabled entirely. Keeping it optional means the service can run
 unauthenticated on the internal network and be locked down when exposed.
+
+**`/health` and the three schema endpoints are never authenticated**, whatever
+`auth_token` is. `/health` is a liveness probe and must work without a
+credential. `/docs`, `/redoc` and `/openapi.json` are FastAPI's built-ins,
+mounted before any dependency this app declares; they publish the request and
+response *shape* — which is the entire point of an agent-facing tool schema —
+and contain no keys, no provider names and no breaker state. Gating them would
+mean disabling FastAPI's built-in routes and re-registering all three by hand,
+which buys nothing here. A deployment that needs them closed should sit behind
+an authenticating reverse proxy.
+
+The token is compared as **bytes**, not as a `str`: `secrets.compare_digest`
+raises `TypeError` on a non-ASCII `str`, and uvicorn decodes headers as
+latin-1, so a `str` comparison turned `Authorization: Bearer sécret` from any
+unauthenticated caller into a 500.
 
 ## 12. Deployment
 
@@ -364,7 +486,16 @@ Development is test-first per the project's TDD practice.
 ## 14. Deferred
 
 - `POST /extract` — URL → content, second capability on the same router, when
-  the existing extraction service gets consolidated in.
+  the existing extraction service gets consolidated in. That service already
+  runs on the home server:
+  - API: `https://scrape-api.local.alban.me`
+  - Docs: `https://scrape.local.alban.me/docs.md`
+
+  Folding it in means adding an `extract` capability registry alongside
+  `search` and writing adapters for it — the router itself needs no change,
+  which is the whole reason it was built capability-agnostic. Candidate
+  providers for that registry, beyond the existing service: Tavily `/extract`,
+  Exa `/contents`, Firecrawl `/scrape`, TinyFish Web Fetch, Jina Reader.
 - Response caching keyed on the normalised request.
 - Per-provider cost accounting (Exa reports `costDollars`, Firecrawl
   `creditsUsed`, Tavily `usage.credits`; all three are currently discarded).

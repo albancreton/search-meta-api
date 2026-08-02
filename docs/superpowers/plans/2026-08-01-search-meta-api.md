@@ -867,14 +867,16 @@ async def test_unparseable_body_becomes_malformed(probe):
     with pytest.raises(ProviderError) as exc:
         await probe.request_json("GET", "https://x.test/s")
     assert exc.value.error_class is ErrorClass.MALFORMED
-
-
-def test_build_results_assigns_rank_and_truncates():
-    rows = [("t1", "u1", "s1"), ("t2", "u2", "s2"), ("t3", "u3", "s3")]
-    results = [SearchResult(title=t, url=u, snippet=s, rank=i + 1)
-               for i, (t, u, s) in enumerate(rows)][:2]
-    assert [r.rank for r in results] == [1, 2]
 ```
+
+**Amended after review (2026-08-01).** A `test_build_results_assigns_rank_and_truncates` originally sat at the end of this block. It was removed: it built a list inside the test and asserted the ranks it had just assigned, exercising nothing in `base.py`, and it named a `build_results` helper that exists nowhere in this project. Rank assignment is covered for real by every adapter's parsing tests in Tasks 6–14.
+
+Review also found four unexercised branches in this module, each now pinned by a test. Since eight adapters inherit `request_json` verbatim, these are the highest-value branches in the file:
+
+- the `scope != UNIVERSAL_SCOPE` guard — a vendor param under `*` must be dropped, never leak into passthrough
+- `if not isinstance(body, dict)` — a JSON array or scalar body is `MALFORMED`, distinct from the non-JSON case already covered
+- `except httpx.RequestError` — the original test raised `ConnectTimeout`, which the earlier `TimeoutException` clause catches, leaving the connection-error path untested; use `httpx.ConnectError`
+- `_retry_after`'s `except ValueError` — an HTTP-date `Retry-After` (RFC-legal, common on 429/503) must yield `None` rather than raising from inside error construction
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -888,7 +890,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Mapping
+from typing import Any, Callable, ClassVar, Mapping, Sequence
 
 import httpx
 
@@ -967,6 +969,25 @@ def domain_operators(query: str, include: list[str], exclude: list[str]) -> str:
         parts.append("(" + " OR ".join(f"site:{d}" for d in include) + ")")
     parts.extend(f"-site:{d}" for d in exclude)
     return " ".join(parts)
+
+
+def build_results(
+    rows: Sequence[Mapping[str, Any]],
+    limit: int,
+    extract: Callable[[Mapping[str, Any], int], SearchResult],
+    keep: Callable[[Mapping[str, Any]], bool] = lambda row: bool(row.get("url")),
+) -> list[SearchResult]:
+    """Filter, then truncate, then rank — in that order.
+
+    The ordering is load-bearing. Truncating first lets an unusable row consume
+    a max_results slot and leaves a gap in the rank sequence, both silently.
+
+    `keep` is a predicate rather than a field name because vendors differ in what
+    makes a row usable: most need a non-empty `url`, Google names that field
+    `link`, and Linkup returns mixed text/image rows where the images must go.
+    """
+    usable = [row for row in rows if keep(row)]
+    return [extract(row, index + 1) for index, row in enumerate(usable[:limit])]
 
 
 class Adapter(ABC):
@@ -1316,15 +1337,20 @@ async def run_failover(
         return int((clock() - started) * 1000)
 
     for instance in instances:
-        if breaker.is_open(instance.name):
-            attempts.append(Attempt(provider=instance.name, outcome="skipped",
-                                    reason="breaker-open"))
-            continue
-
+        # The deadline is checked FIRST, and this ordering is load-bearing.
+        # breaker.is_open() is side-effecting: for a HALF_OPEN instance it
+        # consumes the single probe token and returns False. Breaking on the
+        # deadline after that would abandon the token with nothing left to
+        # clear it, blackholing a recovering provider permanently.
         if clock() - started >= deadline_s:
             attempts.append(Attempt(provider=instance.name, outcome="skipped",
                                     reason="deadline-exceeded"))
             break
+
+        if breaker.is_open(instance.name):
+            attempts.append(Attempt(provider=instance.name, outcome="skipped",
+                                    reason="breaker-open"))
+            continue
 
         call_started = clock()
         try:
@@ -1569,7 +1595,7 @@ import pycountry
 
 from search_meta_api.errors import ErrorClass, ProviderError
 from search_meta_api.models import EffectiveRequest, SearchResult
-from search_meta_api.providers.base import Adapter, Capabilities
+from search_meta_api.providers.base import Adapter, Capabilities, build_results
 
 ENDPOINT = "https://api.tavily.com/search"
 
@@ -1638,18 +1664,14 @@ class TavilyAdapter(Adapter):
         if not isinstance(rows, list):
             raise ProviderError(self.name, ErrorClass.MALFORMED, status=200,
                                 message="missing 'results' array")
-        return [
-            SearchResult(
-                title=row.get("title") or "",
-                url=row["url"],
-                snippet=row.get("content") or "",
-                rank=index + 1,
-                score=row.get("score"),
-                favicon=row.get("favicon"),
-            )
-            for index, row in enumerate(rows[:limit])
-            if row.get("url")
-        ]
+        return build_results(rows, limit, lambda row, rank: SearchResult(
+            title=row.get("title") or "",
+            url=row["url"],
+            snippet=row.get("content") or "",
+            rank=rank,
+            score=row.get("score"),
+            favicon=row.get("favicon"),
+        ))
 ```
 
 - [ ] **Step 5: Run test to verify it passes**
@@ -1769,8 +1791,13 @@ def test_missing_file_is_a_config_error(tmp_path):
         load_settings(tmp_path / "nope.yaml")
 
 
+@pytest.mark.xfail(reason="cannot pass until every adapter is registered in Task 14")
 def test_example_config_is_valid():
-    """The tracked template must always load — it is the onboarding path."""
+    """The tracked template must always load — it is the onboarding path.
+
+    Marked xfail here and un-marked in Task 14: it is the running tracker for
+    the seven adapters still to come, without leaving the suite red meanwhile.
+    """
     settings = load_settings("config.example.yaml")
     assert len(settings.providers) == 9
     assert [p.name for p in settings.providers][:2] == ["tavily-a", "tavily-b"]
@@ -1810,7 +1837,9 @@ def build_adapter(cfg: Any, client: httpx.AsyncClient, default_timeout_ms: int) 
     return ADAPTERS[cfg.type](
         cfg.name,
         client,
-        timeout_ms=cfg.timeout_ms or default_timeout_ms,
+        # `is not None`, not `or` — a configured 0 must not silently
+        # fall back to the default. (Validation rejects 0 anyway.)
+        timeout_ms=cfg.timeout_ms if cfg.timeout_ms is not None else default_timeout_ms,
         **options,
     )
 ```
@@ -1823,7 +1852,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from search_meta_api.breaker import BreakerSettings
 from search_meta_api.providers.registry import ADAPTERS, REQUIRED_OPTIONS
@@ -1833,17 +1862,29 @@ class ConfigError(Exception):
     pass
 
 
+# Every model forbids unknown keys. Without this a typo is silently dropped and
+# the field falls back to its default — and since `auth_token` lives under
+# `server:`, writing `servr:` or `auth_toke:` would boot the publicly-routed
+# service with authentication disabled and every health check green.
+
+
 class ServerConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     auth_token: str | None = None
-    request_deadline_ms: int = 30_000
+    request_deadline_ms: int = Field(default=30_000, gt=0)
 
 
 class DefaultsConfig(BaseModel):
-    timeout_ms: int = 10_000
+    model_config = ConfigDict(extra="forbid")
+
+    timeout_ms: int = Field(default=10_000, gt=0)
     max_results: int = 10
 
 
 class BreakerConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     fault_threshold: int = 3
     cooldown_ms: int = 60_000
     quota_cooldown_ms: int = 300_000
@@ -1857,15 +1898,19 @@ class BreakerConfig(BaseModel):
 
 
 class ProviderConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     type: str
     api_key: str | None = None
     base_url: str | None = None
     cx: str | None = None
-    timeout_ms: int | None = None
+    timeout_ms: int | None = Field(default=None, gt=0)
 
 
 class Settings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     server: ServerConfig = Field(default_factory=ServerConfig)
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig)
     breaker: BreakerConfig = Field(default_factory=BreakerConfig)
@@ -1920,10 +1965,10 @@ def _validate_providers(settings: Settings) -> None:
 
 - [ ] **Step 5: Create `config.example.yaml`**
 
-All nine instances are listed now so the template is complete; the loader will
-reject the seven types that are not yet registered, which is exactly why
-`test_example_config_is_valid` stays red until Task 14. Comment out everything
-below `tinyfish` for now and uncomment each line as its adapter lands.
+All nine instances are listed now so the template is complete and never needs
+editing again. The loader will reject the seven types that are not yet
+registered — expected, and why `test_example_config_is_valid` is `xfail` until
+Task 14. Leave every line active; nothing here gets commented out.
 
 ```yaml
 # Copy to config.yaml and fill in real keys. config.yaml is gitignored.
@@ -1955,11 +2000,8 @@ providers:
 
 - [ ] **Step 6: Run tests**
 
-Run: `.venv/bin/pytest tests/test_config.py -v --deselect tests/test_config.py::test_example_config_is_valid`
-Expected: PASS — 10 passed
-
-Run: `.venv/bin/pytest tests/test_config.py::test_example_config_is_valid -v`
-Expected: FAIL — `unknown provider type 'tinyfish'`. This test is the tracker for the remaining adapters and goes green in Task 14.
+Run: `.venv/bin/pytest tests/test_config.py -v`
+Expected: PASS — 10 passed, 1 xfailed. The xfailed one is `test_example_config_is_valid`, the tracker for the seven adapters still to come. The suite is green from here on.
 
 - [ ] **Step 7: Commit**
 
@@ -1982,7 +2024,28 @@ ADAPTERS = {..., <Class>.type_name: <Class>}                     # add entry
 REQUIRED_OPTIONS = {..., "<type_name>": ("api_key",)}            # add entry
 ```
 
-Then uncomment that provider's line in `config.example.yaml`.
+`config.example.yaml` already lists all nine instances and needs no edit —
+each registration simply makes one more of its lines loadable. When the last
+adapter lands in Task 14, the whole file resolves and its `xfail` test flips.
+
+### Every adapter must use `build_results` (added after the Task 6 review)
+
+Task 6 originally hand-rolled its result list as `enumerate(rows[:limit])`
+filtered by `if row.get("url")` — truncating *before* discarding unusable rows
+and taking rank from the pre-filter position. Two silent failures follow: with
+rows `[A(url), B(no url), C(url)]` the ranks come back `[1, 3]`, and at
+`limit=2` only `A` is returned because the dead row consumed a slot that `C`
+should have had. Seven adapters were about to copy that shape.
+
+`build_results(rows, limit, extract, keep=...)` in `providers/base.py` now owns
+the ordering — filter, then truncate, then rank — so it is written once and
+cannot be reintroduced. Every adapter calls it; none rebuilds the list itself.
+
+**Each adapter task must include a regression test whose fixture contains a row
+with no usable URL**, asserting that ranks stay 1-based and contiguous and that
+a valid row after the unusable one is still returned. The original fixtures had
+no such row, which is exactly why the defect was invisible to fourteen passing
+tests.
 
 ---
 
@@ -2135,7 +2198,7 @@ from typing import Any
 
 from search_meta_api.errors import ErrorClass, ProviderError
 from search_meta_api.models import EffectiveRequest, SearchResult
-from search_meta_api.providers.base import Adapter, Capabilities
+from search_meta_api.providers.base import Adapter, Capabilities, build_results
 
 ENDPOINT = "https://api.search.tinyfish.ai"
 
@@ -2186,26 +2249,22 @@ class TinyFishAdapter(Adapter):
         if not isinstance(rows, list):
             raise ProviderError(self.name, ErrorClass.MALFORMED, status=200,
                                 message="missing 'results' array")
-        return [
-            SearchResult(
-                title=row.get("title") or "",
-                url=row["url"],
-                snippet=row.get("snippet") or "",
-                rank=index + 1,
-            )
-            for index, row in enumerate(rows[:limit])
-            if row.get("url")
-        ]
+        return build_results(rows, limit, lambda row, rank: SearchResult(
+            title=row.get("title") or "",
+            url=row["url"],
+            snippet=row.get("snippet") or "",
+            rank=rank,
+        ))
 ```
 
 - [ ] **Step 4: Register it**
 
-In `registry.py` add `from search_meta_api.providers.tinyfish import TinyFishAdapter`, add `TinyFishAdapter.type_name: TinyFishAdapter` to `ADAPTERS`, and `"tinyfish": ("api_key",)` to `REQUIRED_OPTIONS`. Uncomment the `tinyfish` line in `config.example.yaml`.
+In `registry.py` add `from search_meta_api.providers.tinyfish import TinyFishAdapter`, add `TinyFishAdapter.type_name: TinyFishAdapter` to `ADAPTERS`, and `"tinyfish": ("api_key",)` to `REQUIRED_OPTIONS`.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/providers/test_tinyfish.py tests/test_config.py -v`
-Expected: PASS on tinyfish (12 passed); `test_example_config_is_valid` still fails on `unknown provider type 'brave'`.
+Expected: PASS — 12 passed on tinyfish; config still 10 passed, 1 xfailed.
 
 - [ ] **Step 6: Commit**
 
@@ -2367,7 +2426,9 @@ from __future__ import annotations
 from typing import Any
 
 from search_meta_api.models import EffectiveRequest, SearchResult
-from search_meta_api.providers.base import Adapter, Capabilities, domain_operators
+from search_meta_api.providers.base import (
+    Adapter, Capabilities, build_results, domain_operators,
+)
 
 ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 
@@ -2429,22 +2490,18 @@ class BraveAdapter(Adapter):
 
     def _parse(self, body: dict[str, Any], limit: int) -> list[SearchResult]:
         rows = (body.get("web") or {}).get("results") or []
-        return [
-            SearchResult(
-                title=row.get("title") or "",
-                url=row["url"],
-                snippet=row.get("description") or "",
-                rank=index + 1,
-                published_date=row.get("page_age"),
-            )
-            for index, row in enumerate(rows[:limit])
-            if row.get("url")
-        ]
+        return build_results(rows, limit, lambda row, rank: SearchResult(
+            title=row.get("title") or "",
+            url=row["url"],
+            snippet=row.get("description") or "",
+            rank=rank,
+            published_date=row.get("page_age"),
+        ))
 ```
 
 - [ ] **Step 4: Register it**
 
-Add the import, the `ADAPTERS` entry, and `"brave": ("api_key",)` to `REQUIRED_OPTIONS`. Uncomment the `brave` line in `config.example.yaml`.
+Add the import, the `ADAPTERS` entry, and `"brave": ("api_key",)` to `REQUIRED_OPTIONS`.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -2616,7 +2673,7 @@ from typing import Any
 
 from search_meta_api.errors import ErrorClass, ProviderError
 from search_meta_api.models import EffectiveRequest, SearchResult
-from search_meta_api.providers.base import Adapter, Capabilities
+from search_meta_api.providers.base import Adapter, Capabilities, build_results
 
 ENDPOINT = "https://api.exa.ai/search"
 
@@ -2678,27 +2735,25 @@ class ExaAdapter(Adapter):
         if not isinstance(rows, list):
             raise ProviderError(self.name, ErrorClass.MALFORMED, status=200,
                                 message="missing 'results' array")
-        results = []
-        for index, row in enumerate(rows[:limit]):
-            if not row.get("url"):
-                continue
+        def to_result(row: Mapping[str, Any], rank: int) -> SearchResult:
             highlights = row.get("highlights") or []
             scores = row.get("highlightScores") or []
-            results.append(SearchResult(
+            return SearchResult(
                 title=row.get("title") or "",
                 url=row["url"],
                 snippet=highlights[0] if highlights else "",
-                rank=index + 1,
+                rank=rank,
                 published_date=row.get("publishedDate"),
                 score=scores[0] if scores else None,
                 favicon=row.get("favicon"),
-            ))
-        return results
+            )
+
+        return build_results(rows, limit, to_result)
 ```
 
 - [ ] **Step 4: Register it**
 
-Add the import, the `ADAPTERS` entry, and `"exa": ("api_key",)`. Uncomment the `exa` line in `config.example.yaml`.
+Add the import, the `ADAPTERS` entry, and `"exa": ("api_key",)`.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -2851,7 +2906,7 @@ from typing import Any
 
 from search_meta_api.errors import ErrorClass, ProviderError
 from search_meta_api.models import EffectiveRequest, SearchResult
-from search_meta_api.providers.base import Adapter, Capabilities
+from search_meta_api.providers.base import Adapter, Capabilities, build_results
 
 ENDPOINT = "https://api.linkup.so/v1/search"
 
@@ -2903,25 +2958,24 @@ class LinkupAdapter(Adapter):
         if not isinstance(rows, list):
             raise ProviderError(self.name, ErrorClass.MALFORMED, status=200,
                                 message="missing 'results' array")
-        results = []
-        for row in rows:
-            if row.get("type") != "text" or not row.get("url"):
-                continue
-            results.append(SearchResult(
+        # Linkup returns a mixed text/image list; images are not search results.
+        return build_results(
+            rows,
+            limit,
+            lambda row, rank: SearchResult(
                 title=row.get("name") or "",
                 url=row["url"],
                 snippet=row.get("content") or "",
-                rank=len(results) + 1,
+                rank=rank,
                 favicon=row.get("favicon"),
-            ))
-            if len(results) == limit:
-                break
-        return results
+            ),
+            keep=lambda row: row.get("type") == "text" and bool(row.get("url")),
+        )
 ```
 
 - [ ] **Step 4: Register it**
 
-Add the import, the `ADAPTERS` entry, and `"linkup": ("api_key",)`. Uncomment the `linkup` line in `config.example.yaml`.
+Add the import, the `ADAPTERS` entry, and `"linkup": ("api_key",)`.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -3100,7 +3154,9 @@ from typing import Any
 
 from search_meta_api.errors import ErrorClass, ProviderError
 from search_meta_api.models import EffectiveRequest, SearchResult
-from search_meta_api.providers.base import Adapter, Capabilities, domain_operators
+from search_meta_api.providers.base import (
+    Adapter, Capabilities, build_results, domain_operators,
+)
 
 ENDPOINT = "https://api.firecrawl.dev/v2/search"
 
@@ -3154,22 +3210,18 @@ class FirecrawlAdapter(Adapter):
 
     def _parse(self, body: dict[str, Any], source: str, limit: int) -> list[SearchResult]:
         rows = (body.get("data") or {}).get(source) or []
-        return [
-            SearchResult(
-                title=row.get("title") or "",
-                url=row["url"],
-                snippet=row.get("description") or row.get("snippet") or "",
-                rank=index + 1,
-                published_date=row.get("date"),
-            )
-            for index, row in enumerate(rows[:limit])
-            if row.get("url")
-        ]
+        return build_results(rows, limit, lambda row, rank: SearchResult(
+            title=row.get("title") or "",
+            url=row["url"],
+            snippet=row.get("description") or row.get("snippet") or "",
+            rank=rank,
+            published_date=row.get("date"),
+        ))
 ```
 
 - [ ] **Step 4: Register it**
 
-Add the import, the `ADAPTERS` entry, and `"firecrawl": ("api_key",)`. Uncomment the `firecrawl` line in `config.example.yaml`.
+Add the import, the `ADAPTERS` entry, and `"firecrawl": ("api_key",)`.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -3361,7 +3413,9 @@ import httpx
 
 from search_meta_api.errors import ErrorClass, classify_status
 from search_meta_api.models import EffectiveRequest, SearchResult
-from search_meta_api.providers.base import Adapter, Capabilities, domain_operators
+from search_meta_api.providers.base import (
+    Adapter, Capabilities, build_results, domain_operators,
+)
 
 ENDPOINT = "https://www.googleapis.com/customsearch/v1"
 
@@ -3419,34 +3473,55 @@ class GoogleCseAdapter(Adapter):
         return self._parse(body, req.max_results)
 
     def classify(self, response: httpx.Response) -> ErrorClass:
-        """A 403 is either a bad key or an exhausted quota — the body decides."""
+        """A 403 is either a bad key or an exhausted quota — the body decides.
+
+        This must be total: it is called from inside `request_json`'s error
+        path, so anything raised here escapes as an unhandled error and the
+        router records a misleading MALFORMED instead of parking the provider
+        for a quota cooldown or logging a dead key. Every unexpected shape
+        therefore falls back to AUTH rather than trusting the body's structure.
+        """
         if response.status_code != 403:
             return classify_status(response.status_code)
         try:
-            errors = (response.json().get("error") or {}).get("errors") or []
+            body = response.json()
         except ValueError:
             return ErrorClass.AUTH
-        if any(entry.get("reason") in QUOTA_REASONS for entry in errors):
+        if not isinstance(body, dict):
+            return ErrorClass.AUTH
+        error = body.get("error")
+        if not isinstance(error, dict):
+            return ErrorClass.AUTH
+        errors = error.get("errors")
+        if not isinstance(errors, list):
+            return ErrorClass.AUTH
+        if any(
+            isinstance(entry, dict) and entry.get("reason") in QUOTA_REASONS
+            for entry in errors
+        ):
             return ErrorClass.QUOTA
         return ErrorClass.AUTH
 
     def _parse(self, body: dict[str, Any], limit: int) -> list[SearchResult]:
         rows = body.get("items") or []
-        return [
-            SearchResult(
+        # Google names the URL field `link`, so the default keep predicate
+        # (which looks for `url`) would discard every row.
+        return build_results(
+            rows,
+            limit,
+            lambda row, rank: SearchResult(
                 title=row.get("title") or "",
                 url=row["link"],
                 snippet=row.get("snippet") or "",
-                rank=index + 1,
-            )
-            for index, row in enumerate(rows[:limit])
-            if row.get("link")
-        ]
+                rank=rank,
+            ),
+            keep=lambda row: bool(row.get("link")),
+        )
 ```
 
 - [ ] **Step 4: Register it**
 
-Add the import, the `ADAPTERS` entry, and `"google_cse": ("api_key", "cx")` — note the two required options. Uncomment the `google` line in `config.example.yaml`.
+Add the import, the `ADAPTERS` entry, and `"google_cse": ("api_key", "cx")` — note the two required options.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -3624,7 +3699,9 @@ from typing import Any
 
 from search_meta_api.errors import ErrorClass, ProviderError
 from search_meta_api.models import EffectiveRequest, SearchResult
-from search_meta_api.providers.base import Adapter, Capabilities, domain_operators
+from search_meta_api.providers.base import (
+    Adapter, Capabilities, build_results, domain_operators,
+)
 
 # SearXNG offers day/month/year windows. There is no week.
 TIME_RANGES = {"day": "day", "month": "month", "year": "year"}
@@ -3672,28 +3749,28 @@ class SearxngAdapter(Adapter):
         if not isinstance(rows, list):
             raise ProviderError(self.name, ErrorClass.MALFORMED, status=200,
                                 message="missing 'results' array")
-        return [
-            SearchResult(
-                title=row.get("title") or "",
-                url=row["url"],
-                snippet=row.get("content") or "",
-                rank=index + 1,
-                score=row.get("score"),
-                published_date=row.get("publishedDate"),
-            )
-            for index, row in enumerate(rows[:limit])
-            if row.get("url")
-        ]
+        return build_results(rows, limit, lambda row, rank: SearchResult(
+            title=row.get("title") or "",
+            url=row["url"],
+            snippet=row.get("content") or "",
+            rank=rank,
+            score=row.get("score"),
+            published_date=row.get("publishedDate"),
+        ))
 ```
 
 - [ ] **Step 4: Register it**
 
-Add the import, the `ADAPTERS` entry, and `"searxng": ("base_url",)` — this one needs no `api_key`. Uncomment the `searxng` line in `config.example.yaml`; every provider line should now be active.
+Add the import, the `ADAPTERS` entry, and `"searxng": ("base_url",)` — this one needs no `api_key`.
 
-- [ ] **Step 5: Run the whole suite**
+- [ ] **Step 5: Retire the xfail tracker**
+
+Every adapter is now registered, so `test_example_config_is_valid` can pass. In `tests/test_config.py`, delete its `@pytest.mark.xfail(...)` decorator and the paragraph of its docstring explaining the marker.
+
+- [ ] **Step 6: Run the whole suite**
 
 Run: `.venv/bin/pytest -v`
-Expected: PASS — everything green, including `test_example_config_is_valid`, which has been red since Task 7 and now finds all nine instances resolvable.
+Expected: PASS — everything green with **zero xfailed**. `test_example_config_is_valid` now passes on its own merits: all nine instances in `config.example.yaml` resolve.
 
 - [ ] **Step 6: Commit**
 
@@ -3746,7 +3823,7 @@ import httpx
 import pytest
 
 from search_meta_api.models import SearchRequest
-from search_meta_api.providers.base import Adapter, Capabilities
+from search_meta_api.providers.base import Adapter, Capabilities, build_results
 from search_meta_api.router import ProviderInstance
 from search_meta_api.validation import ParamError, validate_params
 
@@ -3854,8 +3931,14 @@ class ParamError(ValueError):
 
 
 def _flat_is_set(req: SearchRequest, name: str) -> bool:
-    default = UnifiedFilters.model_fields[name].get_default(call_default_factory=True)
-    return getattr(req, name) != default
+    """Did the caller supply this field?
+
+    `model_fields_set`, not a comparison against the model default. Comparing
+    values gets it wrong twice: it misses a genuine conflict where the caller
+    sends a value that happens to equal the default, and it produces a bogus
+    conflict for any field the app has already written to before validation.
+    """
+    return name in req.model_fields_set
 
 
 def validate_params(req: SearchRequest, instances: Sequence[ProviderInstance]) -> None:
@@ -3926,7 +4009,7 @@ from search_meta_api.app import create_app
 from search_meta_api.config import Settings
 from search_meta_api.errors import ErrorClass, ProviderError
 from search_meta_api.models import SearchResult
-from search_meta_api.providers.base import Adapter, Capabilities
+from search_meta_api.providers.base import Adapter, Capabilities, build_results
 from search_meta_api.router import ProviderInstance
 
 SETTINGS_NO_AUTH = Settings(providers=[{"name": "fake-a", "type": "tavily",
@@ -4155,14 +4238,21 @@ def create_app(
               dependencies=[Depends(require_auth)])
     async def search(req: SearchRequest, request: Request) -> SearchResponse:
         state = request.app.state
-        # An omitted max_results takes the deployment's configured default;
-        # an explicit one always wins.
-        if "max_results" not in req.model_fields_set:
-            req.max_results = state.settings.defaults.max_results
+        # Validate the caller's request as they actually sent it, THEN apply
+        # deployment defaults. Assigning to a pydantic model adds the field to
+        # model_fields_set, so filling the default first would make validation
+        # believe the caller supplied max_results and reject a legitimate
+        # '*/max_results' as a duplicate — but only on deployments that tune
+        # defaults.max_results away from the model default.
         try:
             validate_params(req, state.instances)
         except ParamError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        # An omitted max_results takes the deployment's configured default;
+        # an explicit one always wins.
+        if "max_results" not in req.model_fields_set:
+            req.max_results = state.settings.defaults.max_results
 
         async def attempt(instance: ProviderInstance):
             adapter = instance.adapter
@@ -4280,7 +4370,19 @@ WORKDIR /app
 
 COPY pyproject.toml ./
 COPY src/ ./src/
-RUN pip install --no-cache-dir .
+# rm -rf build/ in the same layer: the setuptools backend leaves a second full
+# copy of every module there, and deleting it in a later layer would not shrink
+# the image.
+RUN pip install --no-cache-dir . && rm -rf /app/build
+
+# Nothing here needs privileges — it binds one port, reads one read-only
+# bind-mounted file, and makes outbound HTTPS calls. Fixed high UID so the
+# numeric owner stays stable across rebuilds, which matters because config.yaml
+# arrives from the host.
+RUN groupadd --gid 10001 appuser \
+    && useradd --uid 10001 --gid appuser --no-create-home --shell /usr/sbin/nologin appuser \
+    && chown -R appuser:appuser /app
+USER appuser
 
 EXPOSE 8000
 ENV CONFIG_PATH=/app/config.yaml
@@ -4329,7 +4431,9 @@ Expected: container exits non-zero with `unknown provider type 'altavista'`. A m
 - `restart: unless-stopped`
 - no scheduled jobs, so the host systemd-timer guidance does not apply here
 
-- [ ] **Step 6: Bring it up and verify through the proxy**
+- [ ] **Step 6: Hand off the deploy — do not run it**
+
+Deployment needs real API keys and the home server, so it belongs to the repo owner, not this task. Stop here and leave these commands in the README for them to run once `config.yaml` holds real keys:
 
 ```bash
 docker compose up -d
@@ -4340,7 +4444,7 @@ curl -s -X POST https://search.local.alban.me/search \
   -d '{"query":"claude opus 5 pricing","max_results":3}' | python -m json.tool
 ```
 
-Expected: a `200` with `provider`, `results`, and an `attempts` array naming which provider answered.
+Expected once deployed: a `200` with `provider`, `results`, and an `attempts` array naming which provider answered.
 
 - [ ] **Step 7: Commit**
 
@@ -4414,10 +4518,14 @@ if __name__ == "__main__":
     raise SystemExit(asyncio.run(main()))
 ```
 
-- [ ] **Step 2: Run it against real keys**
+- [ ] **Step 2: Verify it runs, without spending credits**
 
-Run: `.venv/bin/python scripts/smoke.py "claude opus 5 pricing"`
-Expected: one line per provider. Any `FAIL` line names a dead key or a changed response shape — investigate before deploying. A provider with no key configured is expected to fail here.
+There are no real keys in this environment, so do **not** attempt a live run. Verify only that the script is wired correctly and fails cleanly:
+
+Run: `.venv/bin/python scripts/smoke.py 2>&1 | head -20` with no `config.yaml` present.
+Expected: a `ConfigError` naming the missing file — proving imports resolve and the entry point works. Then run it against `CONFIG_PATH=config.example.yaml`; every provider should print a `FAIL` line (placeholder keys), and the summary should read `0/9 providers healthy`. That exercises the full code path including error handling.
+
+The real run against real keys belongs to the repo owner and is documented in the README.
 
 - [ ] **Step 3: Write `README.md`**
 

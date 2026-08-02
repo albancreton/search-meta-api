@@ -1,0 +1,34 @@
+# Copy to config.yaml and fill in real keys. config.yaml is gitignored.
+server:
+  auth_token: "changeme"        # remove or set null to disable auth entirely
+  request_deadline_ms: 30000
+
+defaults:
+  timeout_ms: 10000
+  max_results: 10
+
+breaker:
+  fault_threshold: 3
+  cooldown_ms: 60000
+  quota_cooldown_ms: 300000
+
+# Order is failover order.
+#
+# `name` is an arbitrary instance label, but it may never equal a provider
+# `type` name (the loader refuses to boot if it does) — otherwise a `params`
+# scope prefix like `tavily/...` could mean either "this type" or "the
+# instance literally named tavily", and that ambiguity is exactly what scoped
+# passthrough params must never have. Pick a name that says what the instance
+# is *for*, not a placeholder like `tavily-1` implying a sibling that doesn't
+# exist. `tavily-a` / `tavily-b` below are the one case where two instances of
+# the same vendor genuinely exist, with different keys.
+providers:
+  - {name: tavily-a,           type: tavily,     api_key: "tvly-REPLACE-A"}
+  - {name: tavily-b,           type: tavily,     api_key: "tvly-REPLACE-B", timeout_ms: 15000}
+  - {name: tinyfish-free,      type: tinyfish,   api_key: "REPLACE"}
+  - {name: brave-web,          type: brave,      api_key: "REPLACE"}
+  - {name: exa-web,            type: exa,        api_key: "REPLACE"}
+  - {name: linkup-web,         type: linkup,     api_key: "REPLACE"}
+  - {name: firecrawl-search,   type: firecrawl,  api_key: "fc-REPLACE"}
+  - {name: google,             type: google_cse, api_key: "REPLACE", cx: "REPLACE"}
+  - {name: searxng-selfhosted, type: searxng,    base_url: "https://xng.xmpl.me"}
