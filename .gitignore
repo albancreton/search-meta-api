@@ -1,6 +1,13 @@
 # real config carries API keys inline — only config.example.yaml is tracked
 config.yaml
+
+# any file whose name says it holds keys, dotted or not
+keys.yaml
+keys.yml
 .keys.yaml
+.keys.yml
+*secrets*.yaml
+*secrets*.yml
 
 # editor swap files, which can hold the contents of the above
 *.swp
