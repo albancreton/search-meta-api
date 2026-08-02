@@ -196,14 +196,23 @@ because the vendor's `includeDomains` and `excludeDomains` parameters are
 mutually exclusive.
 
 Anything a provider can't honour — whether because it's structurally absent
-(this table) or value-dependent (e.g. SearXNG supports `freshness` in
-general but has no `week` bucket) — is reported by name in the response's
+(this table) or value-dependent — is reported by name in the response's
 top-level `degraded` list, hoisted from the winning attempt so a caller
 never has to scan `attempts` to learn the answer was loosely filtered.
 When there is no winner — every provider answered emptily, so `provider`
 is `null` — the top-level list is instead the sorted union of every
 attempt's, since an empty answer is exactly when knowing a filter was
 dropped matters most.
+
+The value-dependent cases, all reported the same way:
+
+- **searxng `freshness`** — it has day/month/year windows but no `week`.
+- **brave `freshness`** — Brave has one `freshness` parameter for both a
+  relative window and a date range, and the range is more specific, so it
+  wins; sending `freshness` alongside `start_date`/`end_date` drops the
+  window.
+- **tavily `country`** — Tavily takes country *names*, so an ISO code that
+  doesn't resolve to one has nothing to send.
 
 ## Failover semantics
 

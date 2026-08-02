@@ -33,6 +33,19 @@ class BraveAdapter(Adapter):
         },
     )
 
+    def extra_degraded(self, req: EffectiveRequest) -> list[str]:
+        """Brave has one `freshness` parameter for two things.
+
+        A date range and a relative window are mutually exclusive on the wire,
+        and `_freshness` lets the range win. `freshness` is in
+        `supported_filters`, so nothing else would report the loss — and this
+        service's contract is that anything a provider cannot honour comes back
+        by name in `degraded`.
+        """
+        if req.freshness and (req.start_date or req.end_date):
+            return ["freshness"]
+        return []
+
     async def search(
         self, req: EffectiveRequest, passthrough: dict[str, Any]
     ) -> list[SearchResult]:

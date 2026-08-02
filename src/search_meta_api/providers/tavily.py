@@ -45,6 +45,15 @@ class TavilyAdapter(Adapter):
         },
     )
 
+    def extra_degraded(self, req: EffectiveRequest) -> list[str]:
+        """Tavily takes country *names*, so an ISO code pycountry cannot resolve
+        has nothing to send. `country` is in `supported_filters`, so without
+        this the filter would just vanish from the payload unreported.
+        """
+        if req.country and country_name(req.country) is None:
+            return ["country"]
+        return []
+
     async def search(
         self, req: EffectiveRequest, passthrough: dict[str, Any]
     ) -> list[SearchResult]:

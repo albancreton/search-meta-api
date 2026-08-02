@@ -142,6 +142,19 @@ async def test_missing_results_key_is_malformed(adapter):
     assert exc.value.error_class is ErrorClass.MALFORMED
 
 
+def test_an_unmappable_country_code_is_reported_as_degraded(adapter):
+    """`country_name` returns None for an ISO code pycountry doesn't know, and
+    the payload then simply omits `country` — a silent drop of a filter Tavily
+    is otherwise advertised as supporting.
+    """
+    assert adapter.extra_degraded(EffectiveRequest(query="c", country="zz")) == ["country"]
+
+
+def test_a_mappable_country_code_is_not_degraded(adapter):
+    assert adapter.extra_degraded(EffectiveRequest(query="c", country="fr")) == []
+    assert adapter.extra_degraded(EffectiveRequest(query="c")) == []
+
+
 def test_capabilities():
     caps = TavilyAdapter.capabilities
     assert caps.max_results_cap == 20

@@ -82,6 +82,25 @@ async def test_one_sided_date_range_uses_open_bounds(adapter):
     assert query_of(route)["freshness"] == ["2026-01-01to2999-12-31"]
 
 
+def test_freshness_dropped_for_a_date_range_is_reported_as_degraded(adapter):
+    """`_freshness` lets a date range win and never emits the relative window,
+    but `freshness` is in Brave's supported_filters and the adapter had no
+    extra_degraded — so the drop was silent, breaking the promise that anything
+    a provider cannot honour is reported by name.
+    """
+    both = EffectiveRequest(query="c", freshness="day", start_date=date(2026, 1, 1))
+    assert adapter.extra_degraded(both) == ["freshness"]
+    end_only = EffectiveRequest(query="c", freshness="day", end_date=date(2026, 1, 1))
+    assert adapter.extra_degraded(end_only) == ["freshness"]
+
+
+def test_freshness_or_a_date_range_alone_is_not_degraded(adapter):
+    assert adapter.extra_degraded(EffectiveRequest(query="c", freshness="day")) == []
+    assert adapter.extra_degraded(
+        EffectiveRequest(query="c", start_date=date(2026, 1, 1))) == []
+    assert adapter.extra_degraded(EffectiveRequest(query="c")) == []
+
+
 @respx.mock
 async def test_count_country_language_and_safesearch(adapter):
     route = respx.get(URL).mock(return_value=httpx.Response(200, json=BODY))
