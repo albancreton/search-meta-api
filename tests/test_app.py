@@ -67,6 +67,17 @@ async def test_all_empty_is_a_200_with_no_winner():
     assert body["results"] == []
 
 
+async def test_dropped_filters_are_reported_even_when_no_provider_had_results():
+    """An empty answer is exactly when a caller most needs to know a filter was
+    dropped — it may be why the answer was empty.
+    """
+    app = create_app(SETTINGS_NO_AUTH, instances=[hit("a", []), hit("b", [])])
+    body = (await call(app, json={"query": "cats", "language": "fr"})).json()
+    assert body["provider"] is None
+    assert body["results"] == []
+    assert body["degraded"] == ["language"]
+
+
 async def test_all_failed_is_a_503_carrying_the_attempts():
     app = create_app(SETTINGS_NO_AUTH, instances=[fail("a", 500), fail("b", 401,
                                                                       ErrorClass.AUTH)])

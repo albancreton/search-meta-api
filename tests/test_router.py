@@ -167,6 +167,42 @@ async def test_degraded_from_the_winning_attempt_is_hoisted():
     assert out.attempts[1].degraded == ["language"]
 
 
+async def test_degraded_from_every_attempt_is_surfaced_when_nobody_wins():
+    """With no winner there is no winning attempt to hoist `degraded` from, and
+    the outcome used to be built with `degraded=[]`. A caller who gets zero
+    results and reads only the top-level `degraded` — which is what the README
+    tells them to do — was told nothing was dropped, when a dropped filter may
+    be exactly why the answer was empty. Report the union instead.
+    """
+    dropped = {"a": ["language"], "b": ["country", "language"]}
+
+    async def attempt(instance):
+        return [], dropped[instance.name]
+
+    clock = FakeClock()
+    out = await run_failover(instances("a", "b"), attempt, make_breaker(clock),
+                             deadline_ms=30_000, clock=clock)
+    assert out.winner is None
+    assert out.degraded == ["country", "language"]   # sorted, deduplicated
+
+
+async def test_a_winning_attempt_still_reports_only_its_own_degraded_list():
+    """The union is only for the no-winner case. When one provider answers, its
+    `degraded` list is the truth about the results the caller actually got —
+    folding in filters some earlier provider dropped would be a lie.
+    """
+    dropped = {"a": ["country"], "b": ["language"]}
+
+    async def attempt(instance):
+        return ([] if instance.name == "a" else ["r2"]), dropped[instance.name]
+
+    clock = FakeClock()
+    out = await run_failover(instances("a", "b"), attempt, make_breaker(clock),
+                             deadline_ms=30_000, clock=clock)
+    assert out.winner == "b"
+    assert out.degraded == ["language"]
+
+
 async def test_deadline_check_precedes_breaker_check_to_preserve_half_open_probe():
     """A deadline-truncated request must not permanently consume a HALF_OPEN
     provider's single probe token.

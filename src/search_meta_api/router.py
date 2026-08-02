@@ -116,4 +116,10 @@ async def run_failover(
         return FailoverOutcome(instance.name, items, degraded, attempts,
                                elapsed_ms(), any_answer=True)
 
-    return FailoverOutcome(None, [], [], attempts, elapsed_ms(), any_answer=any_answer)
+    # No winner means no winning attempt to hoist `degraded` from, but each
+    # attempt carries its own list and a caller who reads only the top-level
+    # field would otherwise be told nothing was dropped — when a dropped filter
+    # may be precisely why the answer came back empty. Report the union.
+    degraded = sorted({name for a in attempts for name in a.degraded})
+    return FailoverOutcome(None, [], degraded, attempts, elapsed_ms(),
+                           any_answer=any_answer)

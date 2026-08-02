@@ -190,6 +190,10 @@ Anything a provider can't honour — whether because it's structurally absent
 general but has no `week` bucket) — is reported by name in the response's
 top-level `degraded` list, hoisted from the winning attempt so a caller
 never has to scan `attempts` to learn the answer was loosely filtered.
+When there is no winner — every provider answered emptily, so `provider`
+is `null` — the top-level list is instead the sorted union of every
+attempt's, since an empty answer is exactly when knowing a filter was
+dropped matters most.
 
 ## Failover semantics
 

@@ -294,7 +294,11 @@ from result order, since only TinyFish returns an explicit `position`.
 
 Top-level `degraded` is the winning attempt's `degraded` list, hoisted so a
 caller never has to scan `attempts` to learn the answer was loosely filtered. It
-is always present, `[]` when nothing was dropped.
+is always present, `[]` when nothing was dropped. When there is no winner —
+every provider answered emptily, so `provider` is `null` — it is the sorted,
+deduplicated union of every attempt's list instead: an empty answer is exactly
+when a caller most needs to know a filter was dropped, since the drop may be why
+the answer was empty.
 
 `attempts` is the entire observability story. No external tracing is needed to
 answer "why was that slow", "which key is dead", or "why did filtering look
