@@ -16,7 +16,7 @@ class Fake(Adapter):
     capabilities = Capabilities(
         supported_filters=frozenset({"country"}),
         max_results_cap=20,
-        passthrough_params={"search_depth": str},
+        passthrough_params={"search_depth": str, "chunks_per_source": int},
     )
 
     def __init__(self, name, outcome):
@@ -97,6 +97,39 @@ async def test_bad_namespaced_param_is_422_and_calls_nobody():
                                      "params": {"tavily/serch_depth": "advanced"}})
     assert response.status_code == 422
     assert "no parameter" in response.json()["detail"]
+
+
+async def test_a_numeric_string_max_results_in_params_is_not_a_500():
+    """Regression: `min(value, cap)` on a str raised TypeError, which is not a
+    ParamError and not a ValidationError, so it escaped both handlers and became
+    an unauthenticated remote 500. Every scope spelling must behave the same.
+    """
+    for key in ("*/max_results", "tavily/max_results", "a/max_results"):
+        app = create_app(SETTINGS_NO_AUTH,
+                         instances=[hit("a", [("Cats", "https://a.com")])])
+        response = await call(app, json={"query": "cats", "params": {key: "5"}})
+        assert response.status_code == 200, key
+
+
+async def test_an_unparseable_scoped_unified_value_is_a_422_naming_the_param():
+    app = create_app(SETTINGS_NO_AUTH, instances=[hit("a", [("Cats", "https://a.com")])])
+    response = await call(app, json={"query": "cats",
+                                     "params": {"*/max_results": "many"}})
+    assert response.status_code == 422
+    assert "*/max_results" in response.json()["detail"]
+
+
+async def test_a_boolean_max_results_in_params_is_rejected_not_silently_coerced():
+    app = create_app(SETTINGS_NO_AUTH, instances=[hit("a", [("Cats", "https://a.com")])])
+    response = await call(app, json={"query": "cats", "params": {"*/max_results": True}})
+    assert response.status_code == 422
+
+
+async def test_a_boolean_int_passthrough_param_is_rejected():
+    app = create_app(SETTINGS_NO_AUTH, instances=[hit("a", [("Cats", "https://a.com")])])
+    response = await call(app, json={"query": "cats",
+                                     "params": {"tavily/chunks_per_source": True}})
+    assert response.status_code == 422
 
 
 async def test_missing_query_is_422():

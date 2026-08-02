@@ -58,6 +58,23 @@ def test_max_results_is_clamped_to_the_provider_cap():
     assert degraded == []
 
 
+def test_a_scoped_max_results_is_validated_before_the_cap_clamp_sees_it():
+    """Regression: the clamp used to run on the raw params value.
+
+    `min(value, cap)` on a str raises TypeError — a BaseException-free crash
+    that escaped the endpoint's `except ParamError` and became a 500. The
+    model must be built (and the value coerced) before anything compares it
+    against the cap.
+    """
+    eff, _, _ = resolve(SearchRequest(query="hi", params={"*/max_results": "5"}))
+    assert eff.max_results == 5
+
+
+def test_a_scoped_max_results_above_the_cap_is_still_clamped():
+    eff, _, _ = resolve(SearchRequest(query="hi", params={"*/max_results": "100"}))
+    assert eff.max_results == 20
+
+
 def test_universal_scope_passthrough_param_is_dropped():
     _, passthrough, _ = resolve(SearchRequest(query="hi", params={"*/search_depth": "advanced"}))
     assert passthrough == {}

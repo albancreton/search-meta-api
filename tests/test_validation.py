@@ -86,6 +86,36 @@ def test_out_of_range_value_is_caught(instances):
         check({"tavily/max_results": 0}, instances)
 
 
+def test_a_numeric_string_for_a_unified_field_is_accepted_like_the_flat_field(instances):
+    """`{"max_results": "5"}` at the top level is lax-coerced by pydantic, so the
+    scoped form must behave identically — a loosely-typed LLM tool call routinely
+    produces numeric strings, and inconsistency between the two spellings is a
+    trap. What must never happen is the TypeError this used to raise inside the
+    per-provider cap clamp.
+    """
+    check({"*/max_results": "5"}, instances)
+    check({"tavily/max_results": "5"}, instances)
+    check({"tavily-b/max_results": "5"}, instances)
+
+
+def test_an_unparseable_scoped_unified_value_names_the_offending_param(instances):
+    with pytest.raises(ParamError, match=r"tavily/max_results"):
+        check({"tavily/max_results": "many"}, instances)
+
+
+def test_a_bool_is_rejected_where_a_unified_field_requires_an_int(instances):
+    """`isinstance(True, int)` is True and pydantic's lax mode coerces True to 1,
+    so `'*/max_results': true` silently became max_results=1.
+    """
+    with pytest.raises(ParamError, match="must be int"):
+        check({"*/max_results": True}, instances)
+
+
+def test_a_bool_is_rejected_where_a_passthrough_param_requires_an_int(instances):
+    with pytest.raises(ParamError, match="must be int"):
+        check({"tavily/chunks_per_source": True}, instances)
+
+
 def test_explicit_top_level_value_equal_to_the_default_still_conflicts_with_universal_twin(
     instances,
 ):

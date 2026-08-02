@@ -73,10 +73,15 @@ def resolve_request(
             elif name in capabilities.passthrough_params and scope != UNIVERSAL_SCOPE:
                 passthrough[name] = value
 
-    if capabilities.max_results_cap is not None:
-        values["max_results"] = min(values["max_results"], capabilities.max_results_cap)
-
+    # Build the model BEFORE clamping, and this ordering is load-bearing. The
+    # values above are raw `params` entries, unvalidated and of any JSON type;
+    # `min(value, cap)` on one of those raises TypeError, which is neither a
+    # ParamError nor a pydantic ValidationError and so escaped every handler at
+    # the endpoint and became a 500. Constructing first means the clamp only
+    # ever sees an int that pydantic has already validated and coerced.
     effective = EffectiveRequest(**values)
+    if capabilities.max_results_cap is not None:
+        effective.max_results = min(effective.max_results, capabilities.max_results_cap)
 
     degraded = sorted(
         name
