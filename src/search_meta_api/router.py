@@ -90,6 +90,17 @@ async def run_failover(
                 ms=int((clock() - call_started) * 1000),
             ))
             continue
+        except BaseException:
+            # asyncio.CancelledError inherits BaseException, so it skips both
+            # handlers above — and with them the record_fault/record_success
+            # calls that are the only things that release a HALF_OPEN probe
+            # token consumed by is_open() just now. Abandoning that token
+            # removes the instance from the chain permanently. Hand it back,
+            # then let the cancellation propagate untouched: the caller went
+            # away, which is not a provider fault and must never become a
+            # failover to the next provider.
+            breaker.release_probe(instance.name)
+            raise
 
         call_ms = int((clock() - call_started) * 1000)
         any_answer = True

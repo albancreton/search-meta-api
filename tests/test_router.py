@@ -1,5 +1,8 @@
+import asyncio
 
-from search_meta_api.breaker import BreakerSettings, CircuitBreaker
+import pytest
+
+from search_meta_api.breaker import BreakerSettings, BreakerState, CircuitBreaker
 from search_meta_api.errors import ErrorClass, ProviderError
 from search_meta_api.router import ProviderInstance, run_failover
 
@@ -190,6 +193,52 @@ async def test_deadline_check_precedes_breaker_check_to_preserve_half_open_probe
     # "b" was never reached (the deadline expired first), so its probe token
     # must still be available.
     assert breaker.is_open("b") is False
+
+
+async def test_cancellation_hands_back_a_half_open_probe_token():
+    """asyncio.CancelledError inherits BaseException, so it skips both the
+    `except ProviderError` and the `except Exception` handlers — and with them
+    the record_fault/record_success calls that are the only things that clear a
+    consumed probe token. A cancelled probe (agent tool-call timeout, dropped
+    client connection) therefore left the instance HALF_OPEN with a token
+    nothing could ever release: silently gone from the chain until restart,
+    while /health still reported `half_open` as if it were recovering.
+    """
+    clock = FakeClock()
+    breaker = make_breaker(clock)          # fault_threshold=1
+    breaker.record_fault("a", ErrorClass.TRANSIENT)
+    clock.advance(61)                      # cooldown elapsed -> "a" is HALF_OPEN
+
+    async def attempt(instance):
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_failover(instances("a", "b"), attempt, breaker,
+                           deadline_ms=30_000, clock=clock)
+
+    assert breaker.state("a") is BreakerState.HALF_OPEN
+    assert breaker.is_open("a") is False   # the token came back
+
+
+async def test_cancellation_propagates_instead_of_failing_over():
+    """A cancellation is the caller going away, not a provider fault. It must
+    not be recorded as an error, must not fault the breaker, and must not send
+    the request on to the next provider.
+    """
+    clock = FakeClock()
+    breaker = make_breaker(clock)
+    reached = []
+
+    async def attempt(instance):
+        reached.append(instance.name)
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_failover(instances("a", "b"), attempt, breaker,
+                           deadline_ms=30_000, clock=clock)
+
+    assert reached == ["a"]
+    assert breaker.state("a") is BreakerState.CLOSED
 
 
 async def test_unexpected_adapter_exception_is_contained_as_malformed():

@@ -72,6 +72,23 @@ class CircuitBreaker:
         entry.probe_in_flight = True
         return False
 
+    def release_probe(self, name: str) -> None:
+        """Hand back a probe token taken by `is_open()` but never resolved.
+
+        `is_open()` is side-effecting: in HALF_OPEN it takes the single probe
+        token and returns False. Only `record_success` and `record_fault` give
+        that token back, so any path that takes it and then neither succeeds nor
+        faults — a cancelled request, most realistically — must call this. An
+        abandoned token is unrecoverable: `is_open()` returns True forever, no
+        attempt ever runs to clear it, and the instance drops out of the
+        failover chain until the process restarts.
+
+        Deliberately says nothing about the provider's health: it neither closes
+        the circuit nor extends the cooldown, because an unresolved probe is
+        evidence of neither.
+        """
+        self._entry(name).probe_in_flight = False
+
     def record_success(self, name: str) -> None:
         self._entries[name] = _Entry()
 
