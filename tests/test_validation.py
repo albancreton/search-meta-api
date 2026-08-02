@@ -84,3 +84,17 @@ def test_bad_value_for_a_unified_field_is_caught_before_any_provider_runs(instan
 def test_out_of_range_value_is_caught(instances):
     with pytest.raises(ParamError, match="invalid value"):
         check({"tavily/max_results": 0}, instances)
+
+
+def test_explicit_top_level_value_equal_to_the_default_still_conflicts_with_universal_twin(
+    instances,
+):
+    """A caller who explicitly sends max_results=10 (the model default) alongside
+    '*/max_results' has still declared the same field twice — this must be
+    rejected regardless of whether the explicit value happens to match the
+    default. Detecting "the caller set this" must use model_fields_set, not a
+    comparison against the default value.
+    """
+    req = SearchRequest(query="x", max_results=10, params={"*/max_results": 5})
+    with pytest.raises(ParamError, match="both as a top-level field"):
+        validate_params(req, instances)

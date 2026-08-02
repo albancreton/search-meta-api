@@ -135,6 +135,24 @@ def test_rejects_zero_provider_timeout_ms(tmp_path):
         load_settings(write(tmp_path, data))
 
 
+def test_rejects_zero_defaults_max_results(tmp_path):
+    """defaults.max_results must be positive."""
+    data = {**MINIMAL, "defaults": {"max_results": 0}}
+    with pytest.raises(ConfigError, match="greater than 0"):
+        load_settings(write(tmp_path, data))
+
+
+def test_rejects_defaults_max_results_above_the_request_ceiling(tmp_path):
+    """defaults.max_results must not exceed 100, the same ceiling SearchRequest
+    enforces on a caller's own max_results — otherwise a bad operator config
+    would surface as a caller-facing 422 blaming a provider, or silently clamp
+    on capped providers only.
+    """
+    data = {**MINIMAL, "defaults": {"max_results": 150}}
+    with pytest.raises(ConfigError, match="less than or equal to 100"):
+        load_settings(write(tmp_path, data))
+
+
 def test_example_config_is_valid():
     """The tracked template must always load — it is the onboarding path."""
     settings = load_settings("config.example.yaml")

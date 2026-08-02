@@ -4,7 +4,7 @@ from typing import Sequence
 
 from pydantic import ValidationError
 
-from search_meta_api.models import UNIFIED_FIELDS, SearchRequest, UnifiedFilters
+from search_meta_api.models import UNIFIED_FIELDS, SearchRequest
 from search_meta_api.providers.base import UNIVERSAL_SCOPE, resolve_request
 from search_meta_api.router import ProviderInstance
 
@@ -14,8 +14,17 @@ class ParamError(ValueError):
 
 
 def _flat_is_set(req: SearchRequest, name: str) -> bool:
-    default = UnifiedFilters.model_fields[name].get_default(call_default_factory=True)
-    return getattr(req, name) != default
+    """Whether the caller actually supplied `name` as a top-level field.
+
+    Must check `model_fields_set`, not compare against the field's default:
+    a value equal to the default (e.g. an explicit `max_results=10`) is still
+    a genuine conflict with a `*/`-scoped twin, and comparing against the
+    default would also falsely flag a value the *caller never set* if it was
+    assigned onto the model after construction (e.g. applying a configured
+    default) — assignment adds the field to `model_fields_set` too, so callers
+    of `validate_params` must run it before applying any such default.
+    """
+    return name in req.model_fields_set
 
 
 def validate_params(req: SearchRequest, instances: Sequence[ProviderInstance]) -> None:

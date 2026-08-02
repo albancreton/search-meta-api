@@ -17,14 +17,23 @@ class ServerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     auth_token: str | None = None
-    request_deadline_ms: int = Field(default=30_000, gt=0)
+    request_deadline_ms: int = Field(
+        default=30_000,
+        gt=0,
+        description=(
+            "Best-effort request budget in milliseconds. The router checks "
+            "this before starting each provider attempt, but does not "
+            "interrupt an attempt already in flight, so a request may "
+            "overshoot this deadline by up to one adapter's own timeout."
+        ),
+    )
 
 
 class DefaultsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     timeout_ms: int = Field(default=10_000, gt=0)
-    max_results: int = 10
+    max_results: int = Field(default=10, gt=0, le=100)
 
 
 class BreakerConfig(BaseModel):

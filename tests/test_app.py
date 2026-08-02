@@ -135,6 +135,48 @@ async def test_explicit_max_results_beats_the_configured_default():
     assert captured["max_results"] == 7
 
 
+async def test_universal_max_results_override_not_falsely_rejected_when_default_isnt_10():
+    """Regression: applying the configured default onto req.max_results before
+    validate_params ran made the *default* look like a caller-supplied value,
+    so a genuine '*/max_results' override was rejected as a duplicate whenever
+    the configured default differed from the model default (10).
+    """
+    settings = Settings(defaults={"max_results": 3},
+                        providers=[{"name": "a", "type": "tavily", "api_key": "k"}])
+    captured = {}
+
+    class Capturing(Fake):
+        async def search(self, req, passthrough):
+            captured["max_results"] = req.max_results
+            return []
+
+    app = create_app(settings, instances=[ProviderInstance("a", Capturing("a", []))])
+    response = await call(app, json={"query": "cats", "params": {"*/max_results": 5}})
+    assert response.status_code == 200
+    assert captured["max_results"] == 5
+
+
+async def test_extra_degraded_hook_is_merged_into_response_and_attempt():
+    """extra_degraded reports value-dependent gaps for filters that ARE in
+    supported_filters (unlike resolve_request's static degraded list), so this
+    is the only path that can catch a regression in the merge in app.py.
+    """
+    class WithExtraDegraded(Fake):
+        def extra_degraded(self, req):
+            return ["country"]  # "country" IS in Fake.capabilities.supported_filters
+
+    instance = ProviderInstance("a", WithExtraDegraded("a", [
+        SearchResult(title="Cats", url="https://a.com", snippet="s", rank=1)
+    ]))
+    app = create_app(SETTINGS_NO_AUTH, instances=[instance])
+    # "language" is a static gap (not in supported_filters); "country" only
+    # shows up via extra_degraded. The union must contain both, sorted.
+    response = await call(app, json={"query": "cats", "language": "fr"})
+    body = response.json()
+    assert body["degraded"] == ["country", "language"]
+    assert body["attempts"][0]["degraded"] == ["country", "language"]
+
+
 async def test_auth_is_enforced_when_a_token_is_configured():
     settings = Settings(server={"auth_token": "secret"},
                         providers=[{"name": "a", "type": "tavily", "api_key": "k"}])

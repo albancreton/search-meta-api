@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
 from contextlib import asynccontextmanager
 from typing import Any, Sequence
 
@@ -23,7 +24,8 @@ def require_auth(request: Request) -> None:
     token = request.app.state.settings.server.auth_token
     if token is None:
         return
-    if request.headers.get("Authorization") != f"Bearer {token}":
+    presented = request.headers.get("Authorization", "")
+    if not secrets.compare_digest(presented, f"Bearer {token}"):
         raise HTTPException(status_code=401, detail="invalid or missing bearer token")
 
 
@@ -60,24 +62,21 @@ def create_app(
         `server.request_deadline_ms` is a **best-effort** budget: the router
         checks it before starting each provider attempt, but nothing interrupts
         an attempt already in flight, so a request can overshoot the deadline
-        by up to one adapter's own timeout (10s by default). This is a
-        deliberate choice — enforcing a hard wall-clock bound would mean
-        cancelling an in-flight provider call, which would either discard the
-        partial attempt history the router has already built up or require
-        restructuring `run_failover` to stream it out incrementally. Given the
-        modest overshoot bound (one timeout, not unbounded), the advisory
-        check the router already performs is preferred over that added
-        complexity.
+        by up to one adapter's own timeout (10s by default).
         """
         state = request.app.state
-        # An omitted max_results takes the deployment's configured default;
-        # an explicit one always wins.
-        if "max_results" not in req.model_fields_set:
-            req.max_results = state.settings.defaults.max_results
         try:
             validate_params(req, state.instances)
         except ParamError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        # An omitted max_results takes the deployment's configured default; an
+        # explicit one always wins. This must happen AFTER validate_params:
+        # assigning to the model adds the field to model_fields_set, which
+        # would make the applied default look like a caller-supplied value
+        # and falsely conflict with a '*/max_results' override.
+        if "max_results" not in req.model_fields_set:
+            req.max_results = state.settings.defaults.max_results
 
         async def attempt(instance: ProviderInstance):
             adapter = instance.adapter
