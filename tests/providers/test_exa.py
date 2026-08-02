@@ -121,19 +121,33 @@ def test_capabilities():
 
 
 @respx.mock
-async def test_missing_url_filtered_but_ranks_contiguous(adapter):
-    """Rows without url are filtered out; ranks stay contiguous and 1-based."""
-    body_with_missing_url = {
+async def test_unusable_row_does_not_create_a_rank_gap_or_consume_a_truncation_slot(adapter):
+    """Rows without url are filtered out; ranks stay contiguous and 1-based.
+    The middle row has no url, so it must be filtered before truncation.
+    If truncation happened first, only 1 result would remain instead of 2."""
+    body = {
         "results": [
-            {"title": "Valid", "url": "https://a.com", "highlights": ["snippet1"], "highlightScores": [0.9]},
-            {"title": "Invalid", "highlights": ["snippet2"], "highlightScores": [0.8]},  # no url
-            {"title": "Valid2", "url": "https://c.com", "highlights": ["snippet3"], "highlightScores": [0.7]},
+            {"title": "Cats", "url": "https://a.com", "highlights": ["about cats"], "highlightScores": [0.9]},
+            {"title": "No URL", "highlights": ["dropped"]},  # no url - must be filtered out
+            {"title": "Dogs", "url": "https://c.com", "highlights": ["about dogs"], "highlightScores": [0.8]},
         ]
     }
-    respx.post(URL).mock(return_value=httpx.Response(200, json=body_with_missing_url))
+    respx.post(URL).mock(return_value=httpx.Response(200, json=body))
+    results = await adapter.search(EffectiveRequest(query="test", max_results=2), {})
+    assert [r.title for r in results] == ["Cats", "Dogs"]
+    assert [r.rank for r in results] == [1, 2]
+
+
+@respx.mock
+async def test_missing_highlights_key_yields_empty_snippet_and_no_score(adapter):
+    """When highlights key is absent (not just an empty array), snippet is empty and score is None."""
+    body = {
+        "results": [
+            {"title": "No highlights key", "url": "https://a.com"},  # no highlights key at all
+        ]
+    }
+    respx.post(URL).mock(return_value=httpx.Response(200, json=body))
     results = await adapter.search(EffectiveRequest(query="test"), {})
-    assert len(results) == 2
-    assert results[0].rank == 1
-    assert results[0].url == "https://a.com"
-    assert results[1].rank == 2
-    assert results[1].url == "https://c.com"
+    assert len(results) == 1
+    assert results[0].snippet == ""
+    assert results[0].score is None
