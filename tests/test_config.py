@@ -44,6 +44,16 @@ def test_auth_token_may_be_absent(tmp_path):
     assert load_settings(write(tmp_path, data)).server.auth_token is None
 
 
+def test_rejects_a_non_ascii_auth_token(tmp_path):
+    """An HTTP header is latin-1 on the wire and the token is compared as bytes.
+    A non-ASCII token can never match anything a client can send, so every
+    request — including correct ones — would fail. Refuse to boot instead.
+    """
+    data = {**MINIMAL, "server": {"auth_token": "sécret"}}
+    with pytest.raises(ConfigError, match="ASCII"):
+        load_settings(write(tmp_path, data))
+
+
 def test_rejects_unknown_provider_type(tmp_path):
     data = {**MINIMAL, "providers": [{"name": "x", "type": "altavista", "api_key": "k"}]}
     with pytest.raises(ConfigError, match="unknown provider type"):

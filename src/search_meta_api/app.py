@@ -25,8 +25,13 @@ def require_auth(request: Request) -> None:
     token = request.app.state.settings.server.auth_token
     if token is None:
         return
-    presented = request.headers.get("Authorization", "")
-    if not secrets.compare_digest(presented, f"Bearer {token}"):
+    # Compare as bytes, not str: secrets.compare_digest raises TypeError on a
+    # non-ASCII str, and an HTTP header is latin-1 on the wire, so
+    # `Authorization: Bearer sécret` from any unauthenticated caller would
+    # otherwise be a 500. The token itself is ASCII-only by config validation,
+    # so a non-ASCII header simply cannot match — which is the correct answer.
+    presented = request.headers.get("Authorization", "").encode("utf-8", "surrogateescape")
+    if not secrets.compare_digest(presented, f"Bearer {token}".encode()):
         raise HTTPException(status_code=401, detail="invalid or missing bearer token")
 
 

@@ -220,6 +220,20 @@ async def test_auth_is_enforced_when_a_token_is_configured():
                        headers={"Authorization": "Bearer secret"})).status_code == 200
 
 
+async def test_a_non_ascii_authorization_header_is_a_401_not_a_500():
+    """secrets.compare_digest raises TypeError on a non-ASCII str, and uvicorn
+    decodes headers as latin-1 — so `Authorization: Bearer sécret` gave an
+    unauthenticated remote a 500. The bytes are sent latin-1 encoded here to
+    mirror exactly what arrives off the wire.
+    """
+    settings = Settings(server={"auth_token": "secret"},
+                        providers=[{"name": "a", "type": "tavily", "api_key": "k"}])
+    app = create_app(settings, instances=[hit("a", [("Cats", "https://a.com")])])
+    response = await call(app, json={"query": "c"},
+                          headers={"Authorization": "Bearer sécret".encode("latin-1")})
+    assert response.status_code == 401
+
+
 async def test_auth_is_disabled_when_no_token_is_configured():
     app = create_app(SETTINGS_NO_AUTH, instances=[hit("a", [("Cats", "https://a.com")])])
     assert (await call(app, json={"query": "c"})).status_code == 200

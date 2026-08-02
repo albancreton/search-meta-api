@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from search_meta_api.breaker import BreakerSettings
 from search_meta_api.providers.registry import ADAPTERS, REQUIRED_OPTIONS
@@ -27,6 +27,23 @@ class ServerConfig(BaseModel):
             "overshoot this deadline by up to one adapter's own timeout."
         ),
     )
+
+    @field_validator("auth_token")
+    @classmethod
+    def _must_be_ascii(cls, v: str | None) -> str | None:
+        """A non-ASCII token is unusable, so refuse to boot rather than serve.
+
+        The token is compared byte-for-byte against an `Authorization` header,
+        and HTTP headers are latin-1 on the wire. A token containing any
+        non-ASCII character could never be matched by any client, so *every*
+        request would 401 — including the operator's own correct one.
+        """
+        if v is not None and not v.isascii():
+            raise ValueError(
+                "auth_token must contain only ASCII characters: it is compared "
+                "against an HTTP header, which cannot carry anything else"
+            )
+        return v
 
 
 class DefaultsConfig(BaseModel):
