@@ -1837,7 +1837,9 @@ def build_adapter(cfg: Any, client: httpx.AsyncClient, default_timeout_ms: int) 
     return ADAPTERS[cfg.type](
         cfg.name,
         client,
-        timeout_ms=cfg.timeout_ms or default_timeout_ms,
+        # `is not None`, not `or` — a configured 0 must not silently
+        # fall back to the default. (Validation rejects 0 anyway.)
+        timeout_ms=cfg.timeout_ms if cfg.timeout_ms is not None else default_timeout_ms,
         **options,
     )
 ```
@@ -1850,7 +1852,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from search_meta_api.breaker import BreakerSettings
 from search_meta_api.providers.registry import ADAPTERS, REQUIRED_OPTIONS
@@ -1860,17 +1862,29 @@ class ConfigError(Exception):
     pass
 
 
+# Every model forbids unknown keys. Without this a typo is silently dropped and
+# the field falls back to its default — and since `auth_token` lives under
+# `server:`, writing `servr:` or `auth_toke:` would boot the publicly-routed
+# service with authentication disabled and every health check green.
+
+
 class ServerConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     auth_token: str | None = None
-    request_deadline_ms: int = 30_000
+    request_deadline_ms: int = Field(default=30_000, gt=0)
 
 
 class DefaultsConfig(BaseModel):
-    timeout_ms: int = 10_000
+    model_config = ConfigDict(extra="forbid")
+
+    timeout_ms: int = Field(default=10_000, gt=0)
     max_results: int = 10
 
 
 class BreakerConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     fault_threshold: int = 3
     cooldown_ms: int = 60_000
     quota_cooldown_ms: int = 300_000
@@ -1884,15 +1898,19 @@ class BreakerConfig(BaseModel):
 
 
 class ProviderConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     type: str
     api_key: str | None = None
     base_url: str | None = None
     cx: str | None = None
-    timeout_ms: int | None = None
+    timeout_ms: int | None = Field(default=None, gt=0)
 
 
 class Settings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     server: ServerConfig = Field(default_factory=ServerConfig)
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig)
     breaker: BreakerConfig = Field(default_factory=BreakerConfig)
