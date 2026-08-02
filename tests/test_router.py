@@ -126,15 +126,24 @@ async def test_success_after_a_fault_run_closes_the_breaker():
 
 
 async def test_deadline_stops_the_chain_mid_walk():
+    # A 4th provider ("d") is included specifically so that stopping the loop
+    # (break) versus merely skipping this instance (continue) produces a
+    # different attempts list: with "c" as the last provider, break vs.
+    # continue would be observationally identical and the test would pass
+    # either way.
     clock = FakeClock()
-    out = await run(["a", "b", "c"],
+    out = await run(["a", "b", "c", "d"],
                     {"a": ProviderError("a", ErrorClass.TRANSIENT, 500),
                      "b": ProviderError("b", ErrorClass.TRANSIENT, 500),
-                     "c": ["r3"]},
+                     "c": ProviderError("c", ErrorClass.TRANSIENT, 500),
+                     "d": ["r4"]},
                     clock=clock, deadline_ms=1500, cost_s=1.0)
     assert out.winner is None
     assert out.attempts[-1].outcome == "skipped"
     assert out.attempts[-1].reason == "deadline-exceeded"
+    # Exactly 3 attempts: "a" errors, "b" errors, "c" is skipped for the
+    # deadline, and the loop stops there — "d" is never attempted.
+    assert len(out.attempts) == 3
 
 
 async def test_attempts_record_elapsed_milliseconds():
@@ -156,6 +165,34 @@ async def test_degraded_from_the_winning_attempt_is_hoisted():
     assert out.attempts[1].degraded == ["language"]
 
 
+async def test_deadline_check_precedes_breaker_check_to_preserve_half_open_probe():
+    """A deadline-truncated request must not permanently consume a HALF_OPEN
+    provider's single probe token.
+
+    breaker.is_open() is side-effecting: for a HALF_OPEN instance it sets
+    probe_in_flight and returns False, admitting exactly one probe. Only
+    record_success/record_fault clear that flag. If the deadline fires before
+    the probe's attempt() ever runs, and the breaker check already consumed
+    the token, nothing will ever release it — the instance blackholes forever.
+    The router must check the deadline before the breaker so the token is
+    only taken when an attempt will actually follow.
+    """
+    clock = FakeClock()
+    breaker = make_breaker(clock)
+    breaker.record_fault("b", ErrorClass.TRANSIENT)  # opens "b" for cooldown_s=60
+    clock.advance(61)  # cooldown elapsed -> "b" is now HALF_OPEN
+
+    out = await run(["a", "b"], {"a": [], "b": ["r2"]}, clock=clock, breaker=breaker,
+                    deadline_ms=1500, cost_s=2.0)
+
+    assert out.winner is None
+    assert out.attempts[-1].outcome == "skipped"
+    assert out.attempts[-1].reason == "deadline-exceeded"
+    # "b" was never reached (the deadline expired first), so its probe token
+    # must still be available.
+    assert breaker.is_open("b") is False
+
+
 async def test_unexpected_adapter_exception_is_contained_as_malformed():
     async def attempt(instance):
         if instance.name == "a":
@@ -167,3 +204,48 @@ async def test_unexpected_adapter_exception_is_contained_as_malformed():
                              deadline_ms=30_000, clock=clock)
     assert out.winner == "b"
     assert out.attempts[0].error_class == "MALFORMED"
+
+
+async def test_empty_result_resets_the_breakers_fault_count():
+    # record_success resets the entry wholesale. An empty result set is a
+    # successful (if unhelpful) response, so it must call record_success just
+    # like a non-empty one — clearing any fault count accumulated so far.
+    clock = FakeClock()
+    breaker = CircuitBreaker(
+        BreakerSettings(fault_threshold=2, cooldown_s=60.0, quota_cooldown_s=300.0),
+        clock=clock,
+    )
+    breaker.record_fault("a", ErrorClass.TRANSIENT)  # 1 fault, below threshold of 2
+    assert breaker.is_open("a") is False
+
+    await run(["a", "b"], {"a": [], "b": ["r2"]}, clock=clock, breaker=breaker)
+
+    # If the empty path had not reset the count, this second fault would bring
+    # "a" to 2/2 and open the breaker. Because record_success ran on the
+    # empty branch, "a" starts fresh: this is only fault 1 of 2.
+    breaker.record_fault("a", ErrorClass.TRANSIENT)
+    assert breaker.is_open("a") is False
+
+
+async def test_error_class_is_recorded_for_auth_and_quota_failures():
+    out = await run(["a", "b"], {"a": ProviderError("a", ErrorClass.AUTH, 401),
+                                 "b": ProviderError("b", ErrorClass.QUOTA, 432)})
+    assert out.attempts[0].error_class == "AUTH"
+    assert out.attempts[1].error_class == "QUOTA"
+
+
+async def test_retry_after_s_extends_the_cooldown_beyond_the_configured_value():
+    clock = FakeClock()
+    breaker = make_breaker(clock)  # configured cooldown_s=60.0
+    await run(
+        ["a", "b"],
+        {"a": ProviderError("a", ErrorClass.TRANSIENT, 500, retry_after_s=120.0),
+         "b": ["r2"]},
+        clock=clock, breaker=breaker,
+    )
+
+    clock.advance(90)  # past the configured 60s cooldown, before retry_after_s's 120s
+    assert breaker.is_open("a") is True
+
+    clock.advance(40)  # now past the full 120s retry_after_s
+    assert breaker.is_open("a") is False

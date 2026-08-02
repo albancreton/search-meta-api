@@ -174,8 +174,8 @@ never becomes a vendor 400 halfway down the chain.
 
 ```
 for instance in configured_order:
-    if breaker.is_open(instance):        → record skipped, continue
     if deadline_exceeded():              → stop, return 503
+    if breaker.is_open(instance):        → record skipped, continue
     try:
         results = await instance.search(request)
     except ProviderError as e:           → record error, breaker.fault(e), continue

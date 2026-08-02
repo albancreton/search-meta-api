@@ -51,15 +51,20 @@ async def run_failover(
         return int((clock() - started) * 1000)
 
     for instance in instances:
-        if breaker.is_open(instance.name):
-            attempts.append(Attempt(provider=instance.name, outcome="skipped",
-                                    reason="breaker-open"))
-            continue
-
+        # The deadline is checked FIRST, and this ordering is load-bearing.
+        # breaker.is_open() is side-effecting: for a HALF_OPEN instance it
+        # consumes the single probe token and returns False. Breaking on the
+        # deadline after that would abandon the token with nothing left to
+        # clear it, blackholing a recovering provider permanently.
         if clock() - started >= deadline_s:
             attempts.append(Attempt(provider=instance.name, outcome="skipped",
                                     reason="deadline-exceeded"))
             break
+
+        if breaker.is_open(instance.name):
+            attempts.append(Attempt(provider=instance.name, outcome="skipped",
+                                    reason="breaker-open"))
+            continue
 
         call_started = clock()
         try:
