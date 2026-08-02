@@ -135,13 +135,8 @@ def test_rejects_zero_provider_timeout_ms(tmp_path):
         load_settings(write(tmp_path, data))
 
 
-@pytest.mark.xfail(reason="cannot pass until every adapter is registered in Task 14")
 def test_example_config_is_valid():
-    """The tracked template must always load — it is the onboarding path.
-
-    Marked xfail here and un-marked in Task 14: it is the running tracker for
-    the seven adapters still to come, without leaving the suite red meanwhile.
-    """
+    """The tracked template must always load — it is the onboarding path."""
     settings = load_settings("config.example.yaml")
     assert len(settings.providers) == 9
     assert [p.name for p in settings.providers][:2] == ["tavily-a", "tavily-b"]
