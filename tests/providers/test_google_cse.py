@@ -158,3 +158,48 @@ async def test_regression_filter_then_truncate_with_unusable_row_between(adapter
     assert results[0].url == "https://first.com"
     assert results[1].url == "https://third.com"
     assert [r.rank for r in results] == [1, 2]
+
+
+@respx.mock
+async def test_403_with_top_level_array_falls_back_to_auth(adapter):
+    """403 with a top-level JSON array (not dict) should be treated as AUTH."""
+    respx.get(URL).mock(return_value=httpx.Response(403, json=[]))
+    with pytest.raises(ProviderError) as exc:
+        await adapter.search(EffectiveRequest(query="x"), {})
+    assert exc.value.error_class is ErrorClass.AUTH
+
+
+@respx.mock
+async def test_403_with_error_as_string_falls_back_to_auth(adapter):
+    """403 where error is a string (not dict) should be treated as AUTH."""
+    respx.get(URL).mock(return_value=httpx.Response(403, json={"error": "a string"}))
+    with pytest.raises(ProviderError) as exc:
+        await adapter.search(EffectiveRequest(query="x"), {})
+    assert exc.value.error_class is ErrorClass.AUTH
+
+
+@respx.mock
+async def test_403_with_error_dict_but_no_errors_key_falls_back_to_auth(adapter):
+    """403 where error dict exists but has no errors key should be treated as AUTH."""
+    respx.get(URL).mock(return_value=httpx.Response(403, json={"error": {}}))
+    with pytest.raises(ProviderError) as exc:
+        await adapter.search(EffectiveRequest(query="x"), {})
+    assert exc.value.error_class is ErrorClass.AUTH
+
+
+@respx.mock
+async def test_403_with_errors_as_string_falls_back_to_auth(adapter):
+    """403 where errors is not a list should be treated as AUTH."""
+    respx.get(URL).mock(return_value=httpx.Response(403, json={"error": {"errors": "not a list"}}))
+    with pytest.raises(ProviderError) as exc:
+        await adapter.search(EffectiveRequest(query="x"), {})
+    assert exc.value.error_class is ErrorClass.AUTH
+
+
+@respx.mock
+async def test_403_with_errors_list_containing_non_dict_falls_back_to_auth(adapter):
+    """403 where errors list contains non-dicts should be treated as AUTH."""
+    respx.get(URL).mock(return_value=httpx.Response(403, json={"error": {"errors": ["not a dict"]}}))
+    with pytest.raises(ProviderError) as exc:
+        await adapter.search(EffectiveRequest(query="x"), {})
+    assert exc.value.error_class is ErrorClass.AUTH

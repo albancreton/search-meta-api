@@ -70,11 +70,22 @@ class GoogleCseAdapter(Adapter):
         if response.status_code != 403:
             return classify_status(response.status_code)
         try:
-            errors = (response.json().get("error") or {}).get("errors") or []
+            body = response.json()
         except ValueError:
             return ErrorClass.AUTH
-        if any(entry.get("reason") in QUOTA_REASONS for entry in errors):
-            return ErrorClass.QUOTA
+        # Guard each level: body must be a dict, error must be a dict, errors must be a list
+        if not isinstance(body, dict):
+            return ErrorClass.AUTH
+        error = body.get("error")
+        if not isinstance(error, dict):
+            return ErrorClass.AUTH
+        errors = error.get("errors")
+        if not isinstance(errors, list):
+            return ErrorClass.AUTH
+        # Check each entry for a quota reason
+        for entry in errors:
+            if isinstance(entry, dict) and entry.get("reason") in QUOTA_REASONS:
+                return ErrorClass.QUOTA
         return ErrorClass.AUTH
 
     def _parse(self, body: dict[str, Any], limit: int) -> list[SearchResult]:
