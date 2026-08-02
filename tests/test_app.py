@@ -301,6 +301,30 @@ async def test_health_is_public_and_reports_breaker_state():
     assert response.json()["providers"] == [{"name": "a", "state": "closed"}]
 
 
+async def test_the_schema_endpoints_are_unauthenticated_as_documented():
+    """`/docs`, `/redoc` and `/openapi.json` are FastAPI built-ins mounted
+    before any dependency this app declares, so `auth_token` does not cover
+    them. The spec used to claim every endpoint but `/health` required
+    authorization; this pins the behaviour the docs now describe.
+    """
+    settings = Settings(server={"auth_token": "secret"},
+                        providers=[{"name": "a", "type": "tavily", "api_key": "k"}])
+    app = create_app(settings, instances=[hit("a", [])])
+    for path in ("/docs", "/redoc", "/openapi.json"):
+        assert (await call(app, path, method="GET")).status_code == 200, path
+
+
+async def test_an_empty_answer_has_no_error_class():
+    """There is no EMPTY member of ErrorClass — the docs used to list one. An
+    empty answer is `outcome: "empty"` with `error_class: null`.
+    """
+    app = create_app(SETTINGS_NO_AUTH, instances=[hit("a", []),
+                                                  hit("b", [("C", "https://a.com")])])
+    attempt = (await call(app, json={"query": "cats"})).json()["attempts"][0]
+    assert attempt["outcome"] == "empty"
+    assert attempt["error_class"] is None
+
+
 async def test_providers_endpoint_lists_order_and_capabilities():
     app = create_app(SETTINGS_NO_AUTH, instances=[hit("a", []), hit("b", [])])
     body = (await call(app, "/providers", method="GET")).json()

@@ -27,6 +27,15 @@ docker compose up -d
 not baked into the image, so rotating a key is just an edit + restart, no
 rebuild. It's gitignored — never commit it.
 
+**Keep `config.yaml` readable by uid 10001.** The container runs as an
+unprivileged `appuser` (uid/gid 10001), and a bind mount carries the host's
+permission bits straight through. `chmod 0600` — the natural instinct for a
+file full of API keys — makes it unreadable inside the container and the
+service fails to boot with `config file not found`, since the host owner
+almost certainly isn't uid 10001. Use `0644`, or `0640` with the file's
+group set to gid 10001. Protect the keys with the *directory's* permissions
+instead; the file itself has to stay readable.
+
 Once it's up:
 
 ```bash
@@ -100,9 +109,41 @@ provider was asked and nobody had results": the same `200`, the same
 because an empty answer is a legitimate outcome; `truncated` is the flag
 that separates "asked everyone" from "ran out of time".
 
+The `503` body — every provider errored — is **nested under `detail`**,
+because it goes out through FastAPI's `HTTPException`:
+
+```json
+{
+  "detail": {
+    "error": "all_providers_failed",
+    "query": "claude opus 5 pricing",
+    "attempts": [
+      {"provider": "tavily-a", "outcome": "error", "error_class": "QUOTA", "status": 432, "ms": 210},
+      {"provider": "brave-web", "outcome": "error", "error_class": "AUTH", "status": 401, "ms": 90}
+    ],
+    "elapsed_ms": 8210
+  }
+}
+```
+
+Reading `response["attempts"]` on a `503` is a `KeyError` — it's
+`response["detail"]["attempts"]`. Note that `truncated` is a `200`-response
+field only; on a `503` the equivalent signal is a final `attempts` entry
+with `reason: "deadline-exceeded"`.
+
 `GET /providers` lists the configured chain, its order, each instance's
 capabilities, and current breaker state. `GET /docs` is FastAPI's generated
 OpenAPI page — the tool schema an agent can call directly.
+
+**Auth covers `/search` and `/providers` only.** When `server.auth_token`
+is set, those two require `Authorization: Bearer <token>`. `/health`,
+`/docs`, `/openapi.json` and `/redoc` are always unauthenticated. That is
+deliberate for `/health` (a liveness probe shouldn't need a credential) and
+accepted for the schema endpoints: they publish the request/response shape,
+which is the point of an agent-facing tool schema, and they contain no keys,
+no provider names and no breaker state. If your deployment can't accept
+that, put the service behind an authenticating reverse proxy — this app
+does not gate them.
 
 ## The `params` scoping rules
 
@@ -123,18 +164,33 @@ override.
 
 A more specific scope wins over a less specific one for the same field.
 
-**The two scope kinds behave differently, and that's the point:**
+**Two kinds of parameter behave differently — and it's the NAME that
+decides which, not the scope:**
 
-- `*` (and flat top-level fields) go through the unified→vendor translation
-  table below. This is **best-effort**: any provider with no equivalent for
-  that filter drops it silently at the wire level and reports the drop in
-  the response's `degraded` list. A typo or an unsupported filter here never
-  reaches a vendor.
-- `<type>` and `<instance name>` scopes are **literal passthrough** straight
-  to that vendor's API, bypassing the unified schema entirely. This is the
-  escape hatch to vendor-specific power features — Exa's `type`, Tavily's
-  `search_depth`, Firecrawl's `scrapeOptions` — without any of them
-  polluting the request shape every other provider has to tolerate.
+- A **unified field name** (`freshness`, `max_results`, `country`, …) goes
+  through the unified→vendor translation table below, in *every* scope. This
+  is **best-effort**: it is validated against the unified type, clamped where
+  the provider caps it, dropped at the wire level by any provider with no
+  equivalent, and that drop is reported in the response's `degraded` list.
+- A name in that adapter's declared `passthrough_params` is **literal
+  passthrough** straight to the vendor's API. Only a `<type>` or
+  `<instance name>` scope can produce one — a `*/` key never becomes
+  passthrough. This is the escape hatch to vendor-specific power features —
+  Exa's `type`, Tavily's `search_depth`, Firecrawl's `scrapeOptions` —
+  without any of them polluting the request shape every other provider has
+  to tolerate.
+
+So a scoped key is **not** automatically raw. `"tavily-b/max_results": 20`
+does not bypass the unified schema: it is the unified `max_results`,
+translated, clamped and degrade-reported like any other, just retargeted at
+one instance. The scope narrows *who* it applies to; it never changes *how*
+it is handled.
+
+That has a consequence worth stating outright: an adapter can never expose a
+`passthrough_params` entry whose name collides with a unified field, because
+the unified branch is matched first and the passthrough branch is
+unreachable. Tavily's `safe_search` was such an entry (see footnote ² below)
+and has been removed.
 
 Each adapter declares its `passthrough_params` as a name → type map.
 Validation happens **at the edge**: an unknown parameter name, a wrong
@@ -143,15 +199,23 @@ before any provider is called — a typo never becomes a vendor 400 halfway
 down the failover chain.
 
 **A note on collisions.** A scoped passthrough parameter can share its name
-with a field the adapter itself sets internally while translating a unified
+with the *vendor-side* field an adapter writes while translating a unified
 filter — and if it does, the passthrough value silently wins, with no
 `degraded` signal. This is by design (passthrough is meant to override,
-unconditionally), but it's easy to trip over. The concrete case in this
-repo: TinyFish translates the unified `topic` field into its own
-`domain_type` parameter (`"news"` or `"web"`) *before* passthrough is
-applied — so `"params": {"tinyfish/domain_type": "…"}` will quietly replace
-whatever `topic` produced. If you set both, `domain_type` from `params`
-wins and you won't see it flagged anywhere in the response.
+unconditionally), but it's easy to trip over. Every current case is the
+unified `topic` field, which three adapters translate into a parameter that
+is also declared as passthrough:
+
+| Set both of these… | …and the passthrough value wins |
+|---|---|
+| `topic` and `tinyfish/domain_type` | `domain_type` (`topic` → `"news"`/`"web"`) |
+| `topic` and `exa/category` | `category` (`topic: "news"` → `"news"`) |
+| `topic` and `searxng/categories` | `categories` (`topic` → `"news"`/`"general"`) |
+
+In all three the passthrough value replaces whatever `topic` produced, and
+you won't see it flagged anywhere in the response. (Firecrawl's `categories`
+passthrough is *not* one of these: Firecrawl translates `topic` into
+`sources`, so the two never touch.)
 
 ## Capability table
 
@@ -248,7 +312,13 @@ response at all.
 | `AUTH` | 401, 403 | fault | standard, logged at ERROR — a dead key needs a human |
 | `QUOTA` | 402, 429, 432, 433, Google `dailyLimitExceeded`/`rateLimitExceeded` | fault — **opens the breaker immediately**, bypassing `fault_threshold` | **extended** — guaranteed to fail again |
 | `MALFORMED` | 200 but unparseable; Firecrawl `success: false`; unexpected 400 | fault | standard |
-| `EMPTY` | 200, zero results | **no fault** | — |
+
+Those four are the whole of `ErrorClass`. **An empty result set is not an
+error class.** A provider that returns 200 with zero results produces an
+attempt with `outcome: "empty"`, `error_class: null`, and no breaker fault
+— in fact it *heals* the breaker, exactly like a non-empty answer, because
+the provider is demonstrably healthy. `"EMPTY"` never appears in
+`error_class`; don't match on it.
 
 **Circuit breaker**, per provider *instance* (`tavily-a` and `tavily-b` are
 independent despite sharing an adapter):

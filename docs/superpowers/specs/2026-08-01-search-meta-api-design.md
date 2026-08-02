@@ -182,14 +182,27 @@ precedence levels. Supplying both `country: "fr"` and `params: {"*/country":
 
 **The two scope kinds behave differently, and that is the point.**
 
-- A `*/` (or flat) parameter goes through the translation table. It is
-  **best-effort**: dropped for any provider with no equivalent, and that drop is
-  reported in the response.
-- A scoped parameter is **literal passthrough** to that vendor's API. It only
-  ever reaches a provider that has the parameter, so the "can't honour it" case
-  cannot arise. It is also the escape hatch to every vendor's power features —
-  Exa's `type`, Tavily's `search_depth`, Firecrawl's `scrapeOptions` — without
-  any of them polluting the unified schema.
+**What decides the handling is the parameter's NAME, not its scope.**
+
+- A parameter whose name is a **unified field** goes through the translation
+  table, in *every* scope including `<type>` and `<instance name>`. It is
+  **best-effort**: validated against the unified type, clamped where the
+  provider caps it, dropped for any provider with no equivalent, and that drop
+  reported in the response's `degraded`. `tavily-b/max_results` is not raw — it
+  is the unified `max_results` retargeted at one instance.
+- A parameter whose name is in that adapter's `passthrough_params` is
+  **literal passthrough** to the vendor's API. Only a `<type>` or
+  `<instance name>` scope can produce one; a `*/` key never becomes
+  passthrough. It is the escape hatch to every vendor's power features — Exa's
+  `type`, Tavily's `search_depth`, Firecrawl's `scrapeOptions` — without any of
+  them polluting the unified schema.
+
+The unified branch is matched **first**, so the two sets must stay disjoint: a
+`passthrough_params` entry whose name is a unified field is unreachable by
+construction, while `GET /providers` would still advertise it. (An earlier
+draft of this section claimed the "can't honour it" case cannot arise for a
+scoped parameter. That was wrong for exactly this reason, and Tavily's
+`safe_search` was the case that proved it — see §6 footnote ².)
 
 **Validation is at the edge.** Each adapter declares `passthrough_params` as a
 name → type map. An unknown parameter name, a wrong type, or a scope naming no
@@ -242,7 +255,12 @@ router is the provider's problem, not the caller's. There is therefore no
 | `AUTH` | 401, 403 | fault | standard, logged at ERROR — a dead key needs a human |
 | `QUOTA` | 402, 429, 432, 433, Google `dailyLimitExceeded`/`rateLimitExceeded` | fault — **opens the breaker immediately**, bypassing `fault_threshold` | **extended** — guaranteed to fail again |
 | `MALFORMED` | 200 but unparseable; Firecrawl `success: false`; unexpected 400 | fault | standard |
-| `EMPTY` | 200, zero results | **no fault** | — |
+
+Those four are the entire `ErrorClass` enum. An empty result set is **not** an
+error class: a 200 with zero results produces an attempt with
+`outcome: "empty"` and `error_class: null`, and calls `breaker.record_success`
+— it heals the breaker rather than merely not faulting it, because a
+well-formed empty answer is proof the provider is healthy.
 
 Tavily's 432 (plan limit) and 433 (pay-as-you-go cap) are distinct from 429 and
 all three classify as `QUOTA`. SearXNG's 403 (`format: json` not enabled in
@@ -303,7 +321,7 @@ response at all.
   ],
   "degraded": ["language"],       // filters this provider could not honour
   "attempts": [
-    {"provider":"tavily-a","outcome":"error","class":"QUOTA","status":432,"ms":210},
+    {"provider":"tavily-a","outcome":"error","error_class":"QUOTA","status":432,"ms":210},
     {"provider":"tinyfish","outcome":"empty","status":200,"ms":480},
     {"provider":"brave","outcome":"skipped","reason":"breaker-open"},
     {"provider":"tavily-b","outcome":"success","status":200,"ms":640,
@@ -340,11 +358,23 @@ results" from "ran out of time".
 answer "why was that slow", "which key is dead", or "why did filtering look
 loose".
 
-Error response (503, every provider failed):
+Error response (503, every provider failed). It is raised as a FastAPI
+`HTTPException`, so the payload is **nested under `detail`** — a caller reading
+`response["attempts"]` on a 503 gets a `KeyError`:
 
 ```jsonc
-{ "error": "all_providers_failed", "query": "…", "attempts": [ … ], "elapsed_ms": 8210 }
+{
+  "detail": {
+    "error": "all_providers_failed",
+    "query": "…",
+    "attempts": [ … ],
+    "elapsed_ms": 8210
+  }
+}
 ```
+
+`truncated` is a field of the 200 response only. On a 503 the equivalent signal
+is a final `attempts` entry with `reason: "deadline-exceeded"`.
 
 ## 10. Configuration
 
@@ -366,15 +396,17 @@ breaker:
   quota_cooldown_ms: 300000
 
 providers:
-  - {name: tavily-a, type: tavily,     api_key: "tvly-AAAAA"}
-  - {name: tavily-b, type: tavily,     api_key: "tvly-BBBBB", timeout_ms: 15000}
-  - {name: tinyfish, type: tinyfish,   api_key: "XXXXX"}
-  - {name: brave,    type: brave,      api_key: "BSA…"}
-  - {name: exa,      type: exa,        api_key: "…"}
-  - {name: linkup,   type: linkup,     api_key: "…"}
-  - {name: firecrawl,type: firecrawl,  api_key: "fc-…"}
-  - {name: google,   type: google_cse, api_key: "…", cx: "…"}
-  - {name: searxng,  type: searxng,    base_url: "https://xng.xmpl.me"}
+  # An instance `name` must never equal a provider `type` name — see below.
+  # These match config.example.yaml, which is the authoritative template.
+  - {name: tavily-a,           type: tavily,     api_key: "tvly-AAAAA"}
+  - {name: tavily-b,           type: tavily,     api_key: "tvly-BBBBB", timeout_ms: 15000}
+  - {name: tinyfish-free,      type: tinyfish,   api_key: "XXXXX"}
+  - {name: brave-web,          type: brave,      api_key: "BSA…"}
+  - {name: exa-web,            type: exa,        api_key: "…"}
+  - {name: linkup-web,         type: linkup,     api_key: "…"}
+  - {name: firecrawl-search,   type: firecrawl,  api_key: "fc-…"}
+  - {name: google,             type: google_cse, api_key: "…", cx: "…"}
+  - {name: searxng-selfhosted, type: searxng,    base_url: "https://xng.xmpl.me"}
 ```
 
 `config.yaml` is gitignored; `config.example.yaml` ships with placeholders. The
@@ -383,7 +415,14 @@ a duplicate instance name, or a missing required field — a misconfigured
 provider must not become a silent runtime failure.
 
 Instance names must not collide with type names, so that a scope prefix is
-never ambiguous. The loader enforces this.
+never ambiguous. The loader enforces this and refuses to boot on a collision —
+which is why the example above cannot use bare `tinyfish`, `brave`, `exa`,
+`linkup`, `firecrawl` or `searxng` as instance names.
+
+`auth_token`, if set, must be ASCII-only: it is compared byte-for-byte against
+an `Authorization` header, and HTTP headers cannot carry anything else, so a
+non-ASCII token could never be matched by any client. The loader rejects one
+rather than booting a service where every request fails.
 
 ## 11. API surface
 
@@ -392,12 +431,27 @@ never ambiguous. The loader enforces this.
 | POST | `/search` | the search request (§6) |
 | GET | `/health` | liveness + per-instance breaker state |
 | GET | `/providers` | configured instances, order, capabilities, breaker state |
-| GET | `/docs` | FastAPI OpenAPI — the agent-facing tool schema |
+| GET | `/docs`, `/redoc`, `/openapi.json` | FastAPI OpenAPI — the agent-facing tool schema |
 
-**Auth:** optional static bearer token from `server.auth_token`. When set, every
-endpoint except `/health` requires `Authorization: Bearer <token>`. When unset,
+**Auth:** optional static bearer token from `server.auth_token`. When set,
+`/search` and `/providers` require `Authorization: Bearer <token>`. When unset,
 auth is disabled entirely. Keeping it optional means the service can run
 unauthenticated on the internal network and be locked down when exposed.
+
+**`/health` and the three schema endpoints are never authenticated**, whatever
+`auth_token` is. `/health` is a liveness probe and must work without a
+credential. `/docs`, `/redoc` and `/openapi.json` are FastAPI's built-ins,
+mounted before any dependency this app declares; they publish the request and
+response *shape* — which is the entire point of an agent-facing tool schema —
+and contain no keys, no provider names and no breaker state. Gating them would
+mean disabling FastAPI's built-in routes and re-registering all three by hand,
+which buys nothing here. A deployment that needs them closed should sit behind
+an authenticating reverse proxy.
+
+The token is compared as **bytes**, not as a `str`: `secrets.compare_digest`
+raises `TypeError` on a non-ASCII `str`, and uvicorn decodes headers as
+latin-1, so a `str` comparison turned `Authorization: Bearer sécret` from any
+unauthenticated caller into a 500.
 
 ## 12. Deployment
 
