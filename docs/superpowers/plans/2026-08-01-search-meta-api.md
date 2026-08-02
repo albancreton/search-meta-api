@@ -1769,8 +1769,13 @@ def test_missing_file_is_a_config_error(tmp_path):
         load_settings(tmp_path / "nope.yaml")
 
 
+@pytest.mark.xfail(reason="cannot pass until every adapter is registered in Task 14")
 def test_example_config_is_valid():
-    """The tracked template must always load — it is the onboarding path."""
+    """The tracked template must always load — it is the onboarding path.
+
+    Marked xfail here and un-marked in Task 14: it is the running tracker for
+    the seven adapters still to come, without leaving the suite red meanwhile.
+    """
     settings = load_settings("config.example.yaml")
     assert len(settings.providers) == 9
     assert [p.name for p in settings.providers][:2] == ["tavily-a", "tavily-b"]
@@ -1920,10 +1925,10 @@ def _validate_providers(settings: Settings) -> None:
 
 - [ ] **Step 5: Create `config.example.yaml`**
 
-All nine instances are listed now so the template is complete; the loader will
-reject the seven types that are not yet registered, which is exactly why
-`test_example_config_is_valid` stays red until Task 14. Comment out everything
-below `tinyfish` for now and uncomment each line as its adapter lands.
+All nine instances are listed now so the template is complete and never needs
+editing again. The loader will reject the seven types that are not yet
+registered — expected, and why `test_example_config_is_valid` is `xfail` until
+Task 14. Leave every line active; nothing here gets commented out.
 
 ```yaml
 # Copy to config.yaml and fill in real keys. config.yaml is gitignored.
@@ -1955,11 +1960,8 @@ providers:
 
 - [ ] **Step 6: Run tests**
 
-Run: `.venv/bin/pytest tests/test_config.py -v --deselect tests/test_config.py::test_example_config_is_valid`
-Expected: PASS — 10 passed
-
-Run: `.venv/bin/pytest tests/test_config.py::test_example_config_is_valid -v`
-Expected: FAIL — `unknown provider type 'tinyfish'`. This test is the tracker for the remaining adapters and goes green in Task 14.
+Run: `.venv/bin/pytest tests/test_config.py -v`
+Expected: PASS — 10 passed, 1 xfailed. The xfailed one is `test_example_config_is_valid`, the tracker for the seven adapters still to come. The suite is green from here on.
 
 - [ ] **Step 7: Commit**
 
@@ -1982,7 +1984,9 @@ ADAPTERS = {..., <Class>.type_name: <Class>}                     # add entry
 REQUIRED_OPTIONS = {..., "<type_name>": ("api_key",)}            # add entry
 ```
 
-Then uncomment that provider's line in `config.example.yaml`.
+`config.example.yaml` already lists all nine instances and needs no edit —
+each registration simply makes one more of its lines loadable. When the last
+adapter lands in Task 14, the whole file resolves and its `xfail` test flips.
 
 ---
 
@@ -2200,12 +2204,12 @@ class TinyFishAdapter(Adapter):
 
 - [ ] **Step 4: Register it**
 
-In `registry.py` add `from search_meta_api.providers.tinyfish import TinyFishAdapter`, add `TinyFishAdapter.type_name: TinyFishAdapter` to `ADAPTERS`, and `"tinyfish": ("api_key",)` to `REQUIRED_OPTIONS`. Uncomment the `tinyfish` line in `config.example.yaml`.
+In `registry.py` add `from search_meta_api.providers.tinyfish import TinyFishAdapter`, add `TinyFishAdapter.type_name: TinyFishAdapter` to `ADAPTERS`, and `"tinyfish": ("api_key",)` to `REQUIRED_OPTIONS`.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/providers/test_tinyfish.py tests/test_config.py -v`
-Expected: PASS on tinyfish (12 passed); `test_example_config_is_valid` still fails on `unknown provider type 'brave'`.
+Expected: PASS — 12 passed on tinyfish; config still 10 passed, 1 xfailed.
 
 - [ ] **Step 6: Commit**
 
@@ -2444,7 +2448,7 @@ class BraveAdapter(Adapter):
 
 - [ ] **Step 4: Register it**
 
-Add the import, the `ADAPTERS` entry, and `"brave": ("api_key",)` to `REQUIRED_OPTIONS`. Uncomment the `brave` line in `config.example.yaml`.
+Add the import, the `ADAPTERS` entry, and `"brave": ("api_key",)` to `REQUIRED_OPTIONS`.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -2698,7 +2702,7 @@ class ExaAdapter(Adapter):
 
 - [ ] **Step 4: Register it**
 
-Add the import, the `ADAPTERS` entry, and `"exa": ("api_key",)`. Uncomment the `exa` line in `config.example.yaml`.
+Add the import, the `ADAPTERS` entry, and `"exa": ("api_key",)`.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -2921,7 +2925,7 @@ class LinkupAdapter(Adapter):
 
 - [ ] **Step 4: Register it**
 
-Add the import, the `ADAPTERS` entry, and `"linkup": ("api_key",)`. Uncomment the `linkup` line in `config.example.yaml`.
+Add the import, the `ADAPTERS` entry, and `"linkup": ("api_key",)`.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -3169,7 +3173,7 @@ class FirecrawlAdapter(Adapter):
 
 - [ ] **Step 4: Register it**
 
-Add the import, the `ADAPTERS` entry, and `"firecrawl": ("api_key",)`. Uncomment the `firecrawl` line in `config.example.yaml`.
+Add the import, the `ADAPTERS` entry, and `"firecrawl": ("api_key",)`.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -3446,7 +3450,7 @@ class GoogleCseAdapter(Adapter):
 
 - [ ] **Step 4: Register it**
 
-Add the import, the `ADAPTERS` entry, and `"google_cse": ("api_key", "cx")` — note the two required options. Uncomment the `google` line in `config.example.yaml`.
+Add the import, the `ADAPTERS` entry, and `"google_cse": ("api_key", "cx")` — note the two required options.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -3688,12 +3692,16 @@ class SearxngAdapter(Adapter):
 
 - [ ] **Step 4: Register it**
 
-Add the import, the `ADAPTERS` entry, and `"searxng": ("base_url",)` — this one needs no `api_key`. Uncomment the `searxng` line in `config.example.yaml`; every provider line should now be active.
+Add the import, the `ADAPTERS` entry, and `"searxng": ("base_url",)` — this one needs no `api_key`.
 
-- [ ] **Step 5: Run the whole suite**
+- [ ] **Step 5: Retire the xfail tracker**
+
+Every adapter is now registered, so `test_example_config_is_valid` can pass. In `tests/test_config.py`, delete its `@pytest.mark.xfail(...)` decorator and the paragraph of its docstring explaining the marker.
+
+- [ ] **Step 6: Run the whole suite**
 
 Run: `.venv/bin/pytest -v`
-Expected: PASS — everything green, including `test_example_config_is_valid`, which has been red since Task 7 and now finds all nine instances resolvable.
+Expected: PASS — everything green with **zero xfailed**. `test_example_config_is_valid` now passes on its own merits: all nine instances in `config.example.yaml` resolve.
 
 - [ ] **Step 6: Commit**
 
@@ -4329,7 +4337,9 @@ Expected: container exits non-zero with `unknown provider type 'altavista'`. A m
 - `restart: unless-stopped`
 - no scheduled jobs, so the host systemd-timer guidance does not apply here
 
-- [ ] **Step 6: Bring it up and verify through the proxy**
+- [ ] **Step 6: Hand off the deploy — do not run it**
+
+Deployment needs real API keys and the home server, so it belongs to the repo owner, not this task. Stop here and leave these commands in the README for them to run once `config.yaml` holds real keys:
 
 ```bash
 docker compose up -d
@@ -4340,7 +4350,7 @@ curl -s -X POST https://search.local.alban.me/search \
   -d '{"query":"claude opus 5 pricing","max_results":3}' | python -m json.tool
 ```
 
-Expected: a `200` with `provider`, `results`, and an `attempts` array naming which provider answered.
+Expected once deployed: a `200` with `provider`, `results`, and an `attempts` array naming which provider answered.
 
 - [ ] **Step 7: Commit**
 
@@ -4414,10 +4424,14 @@ if __name__ == "__main__":
     raise SystemExit(asyncio.run(main()))
 ```
 
-- [ ] **Step 2: Run it against real keys**
+- [ ] **Step 2: Verify it runs, without spending credits**
 
-Run: `.venv/bin/python scripts/smoke.py "claude opus 5 pricing"`
-Expected: one line per provider. Any `FAIL` line names a dead key or a changed response shape — investigate before deploying. A provider with no key configured is expected to fail here.
+There are no real keys in this environment, so do **not** attempt a live run. Verify only that the script is wired correctly and fails cleanly:
+
+Run: `.venv/bin/python scripts/smoke.py 2>&1 | head -20` with no `config.yaml` present.
+Expected: a `ConfigError` naming the missing file — proving imports resolve and the entry point works. Then run it against `CONFIG_PATH=config.example.yaml`; every provider should print a `FAIL` line (placeholder keys), and the summary should read `0/9 providers healthy`. That exercises the full code path including error handling.
+
+The real run against real keys belongs to the repo owner and is documented in the README.
 
 - [ ] **Step 3: Write `README.md`**
 
