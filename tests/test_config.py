@@ -82,6 +82,59 @@ def test_missing_file_is_a_config_error(tmp_path):
         load_settings(tmp_path / "nope.yaml")
 
 
+def test_rejects_unknown_top_level_key(tmp_path):
+    """Unknown top-level keys are silently discarded unless we forbid them."""
+    data = {**MINIMAL, "unknown_key": "value"}
+    with pytest.raises(ConfigError, match="extra"):
+        load_settings(write(tmp_path, data))
+
+
+def test_rejects_unknown_key_in_server(tmp_path):
+    """Unknown keys inside server: should be rejected."""
+    data = {**MINIMAL, "server": {"auth_token": "secret", "servr": "typo"}}
+    with pytest.raises(ConfigError, match="extra"):
+        load_settings(write(tmp_path, data))
+
+
+def test_rejects_misspelled_auth_token_key(tmp_path):
+    """Misspelled auth_token (e.g., 'auth_toke') must fail, not silently disable auth."""
+    data = {**MINIMAL, "server": {"auth_toke": "secret"}}
+    with pytest.raises(ConfigError, match="extra"):
+        load_settings(write(tmp_path, data))
+
+
+def test_rejects_unknown_key_in_provider(tmp_path):
+    """Unknown keys inside provider entries should be rejected."""
+    data = {**MINIMAL, "providers": [
+        {"name": "t", "type": "tavily", "api_key": "k", "unknown_option": "value"}
+    ]}
+    with pytest.raises(ConfigError, match="extra"):
+        load_settings(write(tmp_path, data))
+
+
+def test_rejects_zero_timeout_ms_in_defaults(tmp_path):
+    """timeout_ms must be positive."""
+    data = {**MINIMAL, "defaults": {"timeout_ms": 0}}
+    with pytest.raises(ConfigError, match="greater than 0"):
+        load_settings(write(tmp_path, data))
+
+
+def test_rejects_zero_request_deadline_ms(tmp_path):
+    """request_deadline_ms must be positive."""
+    data = {**MINIMAL, "server": {"auth_token": "secret", "request_deadline_ms": 0}}
+    with pytest.raises(ConfigError, match="greater than 0"):
+        load_settings(write(tmp_path, data))
+
+
+def test_rejects_zero_provider_timeout_ms(tmp_path):
+    """provider timeout_ms must be positive."""
+    data = {**MINIMAL, "providers": [
+        {"name": "t", "type": "tavily", "api_key": "k", "timeout_ms": 0}
+    ]}
+    with pytest.raises(ConfigError, match="greater than 0"):
+        load_settings(write(tmp_path, data))
+
+
 @pytest.mark.xfail(reason="cannot pass until every adapter is registered in Task 14")
 def test_example_config_is_valid():
     """The tracked template must always load — it is the onboarding path.

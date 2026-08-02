@@ -24,6 +24,6 @@ def build_adapter(cfg: Any, client: httpx.AsyncClient, default_timeout_ms: int) 
     return ADAPTERS[cfg.type](
         cfg.name,
         client,
-        timeout_ms=cfg.timeout_ms or default_timeout_ms,
+        timeout_ms=cfg.timeout_ms if cfg.timeout_ms is not None else default_timeout_ms,
         **options,
     )
