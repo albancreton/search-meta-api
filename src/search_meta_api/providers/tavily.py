@@ -6,7 +6,7 @@ import pycountry
 
 from search_meta_api.errors import ErrorClass, ProviderError
 from search_meta_api.models import EffectiveRequest, SearchResult
-from search_meta_api.providers.base import Adapter, Capabilities
+from search_meta_api.providers.base import Adapter, Capabilities, build_results
 
 ENDPOINT = "https://api.tavily.com/search"
 
@@ -75,15 +75,11 @@ class TavilyAdapter(Adapter):
         if not isinstance(rows, list):
             raise ProviderError(self.name, ErrorClass.MALFORMED, status=200,
                                 message="missing 'results' array")
-        return [
-            SearchResult(
-                title=row.get("title") or "",
-                url=row["url"],
-                snippet=row.get("content") or "",
-                rank=index + 1,
-                score=row.get("score"),
-                favicon=row.get("favicon"),
-            )
-            for index, row in enumerate(rows[:limit])
-            if row.get("url")
-        ]
+        return build_results(rows, limit, lambda row, rank: SearchResult(
+            title=row.get("title") or "",
+            url=row["url"],
+            snippet=row.get("content") or "",
+            rank=rank,
+            score=row.get("score"),
+            favicon=row.get("favicon"),
+        ))

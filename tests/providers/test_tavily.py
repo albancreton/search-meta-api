@@ -99,6 +99,22 @@ async def test_passthrough_params_are_merged_into_the_payload(adapter):
 
 
 @respx.mock
+async def test_unusable_row_does_not_create_a_rank_gap_or_consume_a_truncation_slot(adapter):
+    body = {
+        "query": "cats",
+        "results": [
+            {"title": "Cats", "url": "https://a.com", "content": "about cats"},
+            {"title": "No URL", "content": "dropped"},
+            {"title": "Dogs", "url": "https://c.com", "content": "about dogs"},
+        ],
+    }
+    respx.post(URL).mock(return_value=httpx.Response(200, json=body))
+    results = await adapter.search(EffectiveRequest(query="cats", max_results=2), {})
+    assert [r.title for r in results] == ["Cats", "Dogs"]
+    assert [r.rank for r in results] == [1, 2]
+
+
+@respx.mock
 async def test_empty_results_is_an_empty_list_not_an_error(adapter):
     respx.post(URL).mock(return_value=httpx.Response(200, json={"query": "x", "results": []}))
     assert await adapter.search(EffectiveRequest(query="x"), {}) == []

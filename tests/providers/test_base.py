@@ -3,9 +3,9 @@ import pytest
 import respx
 
 from search_meta_api.errors import ErrorClass, ProviderError
-from search_meta_api.models import SearchRequest
+from search_meta_api.models import SearchRequest, SearchResult
 from search_meta_api.providers.base import (
-    Adapter, Capabilities, domain_operators, resolve_request,
+    Adapter, Capabilities, build_results, domain_operators, resolve_request,
 )
 
 CAPS = Capabilities(
@@ -103,6 +103,48 @@ def test_domain_operators_builds_a_google_style_query():
         "cats (site:a.com OR site:b.com) -site:c.com")
     assert domain_operators("cats", [], []) == "cats"
     assert domain_operators("cats", ["a.com"], []) == "cats (site:a.com)"
+
+
+def _extract(row: dict, rank: int) -> SearchResult:
+    return SearchResult(
+        title=row.get("title") or "", url=row.get("url", ""), snippet="", rank=rank,
+    )
+
+
+def test_build_results_ranks_stay_contiguous_around_an_unusable_row_in_the_middle():
+    rows = [{"url": "a", "title": "A"}, {"title": "no url"}, {"url": "c", "title": "C"}]
+    results = build_results(rows, 10, _extract)
+    assert [r.title for r in results] == ["A", "C"]
+    assert [r.rank for r in results] == [1, 2]
+
+
+def test_build_results_does_not_let_an_unusable_row_consume_a_truncation_slot():
+    rows = [{"url": "a", "title": "A"}, {"title": "no url"}, {"url": "c", "title": "C"}]
+    results = build_results(rows, 2, _extract)
+    assert [r.title for r in results] == ["A", "C"]
+    assert [r.rank for r in results] == [1, 2]
+
+
+def test_build_results_limit_larger_than_row_count_is_harmless():
+    rows = [{"url": "a", "title": "A"}]
+    results = build_results(rows, 10, _extract)
+    assert [r.title for r in results] == ["A"]
+    assert [r.rank for r in results] == [1]
+
+
+def test_build_results_empty_rows_yields_empty_list():
+    assert build_results([], 10, _extract) == []
+
+
+def test_build_results_honours_a_custom_keep_predicate():
+    rows = [{"link": "a", "title": "A"}, {"title": "no link"}, {"link": "c", "title": "C"}]
+
+    def extract_link(row: dict, rank: int) -> SearchResult:
+        return SearchResult(title=row["title"], url=row["link"], snippet="", rank=rank)
+
+    results = build_results(rows, 10, extract_link, keep=lambda row: bool(row.get("link")))
+    assert [r.title for r in results] == ["A", "C"]
+    assert [r.rank for r in results] == [1, 2]
 
 
 def test_extra_degraded_defaults_to_empty():

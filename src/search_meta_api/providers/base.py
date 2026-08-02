@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Mapping
+from typing import Any, Callable, ClassVar, Mapping, Sequence
 
 import httpx
 
@@ -88,6 +88,21 @@ def domain_operators(query: str, include: list[str], exclude: list[str]) -> str:
         parts.append("(" + " OR ".join(f"site:{d}" for d in include) + ")")
     parts.extend(f"-site:{d}" for d in exclude)
     return " ".join(parts)
+
+
+def build_results(
+    rows: Sequence[Mapping[str, Any]],
+    limit: int,
+    extract: Callable[[Mapping[str, Any], int], SearchResult],
+    keep: Callable[[Mapping[str, Any]], bool] = lambda row: bool(row.get("url")),
+) -> list[SearchResult]:
+    """Filter, then truncate, then rank — in that order.
+
+    The ordering is load-bearing. Truncating first lets an unusable row consume
+    a max_results slot and leaves a gap in the rank sequence, both silently.
+    """
+    usable = [row for row in rows if keep(row)]
+    return [extract(row, index + 1) for index, row in enumerate(usable[:limit])]
 
 
 class Adapter(ABC):
