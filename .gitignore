@@ -1,5 +1,11 @@
 # real config carries API keys inline — only config.example.yaml is tracked
 config.yaml
+.keys.yaml
+
+# editor swap files, which can hold the contents of the above
+*.swp
+*.swo
+*~
 
 # python
 __pycache__/
