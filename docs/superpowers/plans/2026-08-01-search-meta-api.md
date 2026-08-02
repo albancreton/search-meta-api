@@ -890,7 +890,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Mapping
+from typing import Any, Callable, ClassVar, Mapping, Sequence
 
 import httpx
 
@@ -969,6 +969,25 @@ def domain_operators(query: str, include: list[str], exclude: list[str]) -> str:
         parts.append("(" + " OR ".join(f"site:{d}" for d in include) + ")")
     parts.extend(f"-site:{d}" for d in exclude)
     return " ".join(parts)
+
+
+def build_results(
+    rows: Sequence[Mapping[str, Any]],
+    limit: int,
+    extract: Callable[[Mapping[str, Any], int], SearchResult],
+    keep: Callable[[Mapping[str, Any]], bool] = lambda row: bool(row.get("url")),
+) -> list[SearchResult]:
+    """Filter, then truncate, then rank — in that order.
+
+    The ordering is load-bearing. Truncating first lets an unusable row consume
+    a max_results slot and leaves a gap in the rank sequence, both silently.
+
+    `keep` is a predicate rather than a field name because vendors differ in what
+    makes a row usable: most need a non-empty `url`, Google names that field
+    `link`, and Linkup returns mixed text/image rows where the images must go.
+    """
+    usable = [row for row in rows if keep(row)]
+    return [extract(row, index + 1) for index, row in enumerate(usable[:limit])]
 
 
 class Adapter(ABC):
@@ -1576,7 +1595,7 @@ import pycountry
 
 from search_meta_api.errors import ErrorClass, ProviderError
 from search_meta_api.models import EffectiveRequest, SearchResult
-from search_meta_api.providers.base import Adapter, Capabilities
+from search_meta_api.providers.base import Adapter, Capabilities, build_results
 
 ENDPOINT = "https://api.tavily.com/search"
 
@@ -1645,18 +1664,14 @@ class TavilyAdapter(Adapter):
         if not isinstance(rows, list):
             raise ProviderError(self.name, ErrorClass.MALFORMED, status=200,
                                 message="missing 'results' array")
-        return [
-            SearchResult(
-                title=row.get("title") or "",
-                url=row["url"],
-                snippet=row.get("content") or "",
-                rank=index + 1,
-                score=row.get("score"),
-                favicon=row.get("favicon"),
-            )
-            for index, row in enumerate(rows[:limit])
-            if row.get("url")
-        ]
+        return build_results(rows, limit, lambda row, rank: SearchResult(
+            title=row.get("title") or "",
+            url=row["url"],
+            snippet=row.get("content") or "",
+            rank=rank,
+            score=row.get("score"),
+            favicon=row.get("favicon"),
+        ))
 ```
 
 - [ ] **Step 5: Run test to verify it passes**
@@ -1995,6 +2010,25 @@ REQUIRED_OPTIONS = {..., "<type_name>": ("api_key",)}            # add entry
 each registration simply makes one more of its lines loadable. When the last
 adapter lands in Task 14, the whole file resolves and its `xfail` test flips.
 
+### Every adapter must use `build_results` (added after the Task 6 review)
+
+Task 6 originally hand-rolled its result list as `enumerate(rows[:limit])`
+filtered by `if row.get("url")` — truncating *before* discarding unusable rows
+and taking rank from the pre-filter position. Two silent failures follow: with
+rows `[A(url), B(no url), C(url)]` the ranks come back `[1, 3]`, and at
+`limit=2` only `A` is returned because the dead row consumed a slot that `C`
+should have had. Seven adapters were about to copy that shape.
+
+`build_results(rows, limit, extract, keep=...)` in `providers/base.py` now owns
+the ordering — filter, then truncate, then rank — so it is written once and
+cannot be reintroduced. Every adapter calls it; none rebuilds the list itself.
+
+**Each adapter task must include a regression test whose fixture contains a row
+with no usable URL**, asserting that ranks stay 1-based and contiguous and that
+a valid row after the unusable one is still returned. The original fixtures had
+no such row, which is exactly why the defect was invisible to fourteen passing
+tests.
+
 ---
 
 ### Task 8: TinyFish adapter
@@ -2146,7 +2180,7 @@ from typing import Any
 
 from search_meta_api.errors import ErrorClass, ProviderError
 from search_meta_api.models import EffectiveRequest, SearchResult
-from search_meta_api.providers.base import Adapter, Capabilities
+from search_meta_api.providers.base import Adapter, Capabilities, build_results
 
 ENDPOINT = "https://api.search.tinyfish.ai"
 
@@ -2197,16 +2231,12 @@ class TinyFishAdapter(Adapter):
         if not isinstance(rows, list):
             raise ProviderError(self.name, ErrorClass.MALFORMED, status=200,
                                 message="missing 'results' array")
-        return [
-            SearchResult(
-                title=row.get("title") or "",
-                url=row["url"],
-                snippet=row.get("snippet") or "",
-                rank=index + 1,
-            )
-            for index, row in enumerate(rows[:limit])
-            if row.get("url")
-        ]
+        return build_results(rows, limit, lambda row, rank: SearchResult(
+            title=row.get("title") or "",
+            url=row["url"],
+            snippet=row.get("snippet") or "",
+            rank=rank,
+        ))
 ```
 
 - [ ] **Step 4: Register it**
@@ -2378,7 +2408,9 @@ from __future__ import annotations
 from typing import Any
 
 from search_meta_api.models import EffectiveRequest, SearchResult
-from search_meta_api.providers.base import Adapter, Capabilities, domain_operators
+from search_meta_api.providers.base import (
+    Adapter, Capabilities, build_results, domain_operators,
+)
 
 ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 
@@ -2440,17 +2472,13 @@ class BraveAdapter(Adapter):
 
     def _parse(self, body: dict[str, Any], limit: int) -> list[SearchResult]:
         rows = (body.get("web") or {}).get("results") or []
-        return [
-            SearchResult(
-                title=row.get("title") or "",
-                url=row["url"],
-                snippet=row.get("description") or "",
-                rank=index + 1,
-                published_date=row.get("page_age"),
-            )
-            for index, row in enumerate(rows[:limit])
-            if row.get("url")
-        ]
+        return build_results(rows, limit, lambda row, rank: SearchResult(
+            title=row.get("title") or "",
+            url=row["url"],
+            snippet=row.get("description") or "",
+            rank=rank,
+            published_date=row.get("page_age"),
+        ))
 ```
 
 - [ ] **Step 4: Register it**
@@ -2627,7 +2655,7 @@ from typing import Any
 
 from search_meta_api.errors import ErrorClass, ProviderError
 from search_meta_api.models import EffectiveRequest, SearchResult
-from search_meta_api.providers.base import Adapter, Capabilities
+from search_meta_api.providers.base import Adapter, Capabilities, build_results
 
 ENDPOINT = "https://api.exa.ai/search"
 
@@ -2689,22 +2717,20 @@ class ExaAdapter(Adapter):
         if not isinstance(rows, list):
             raise ProviderError(self.name, ErrorClass.MALFORMED, status=200,
                                 message="missing 'results' array")
-        results = []
-        for index, row in enumerate(rows[:limit]):
-            if not row.get("url"):
-                continue
+        def to_result(row: Mapping[str, Any], rank: int) -> SearchResult:
             highlights = row.get("highlights") or []
             scores = row.get("highlightScores") or []
-            results.append(SearchResult(
+            return SearchResult(
                 title=row.get("title") or "",
                 url=row["url"],
                 snippet=highlights[0] if highlights else "",
-                rank=index + 1,
+                rank=rank,
                 published_date=row.get("publishedDate"),
                 score=scores[0] if scores else None,
                 favicon=row.get("favicon"),
-            ))
-        return results
+            )
+
+        return build_results(rows, limit, to_result)
 ```
 
 - [ ] **Step 4: Register it**
@@ -2862,7 +2888,7 @@ from typing import Any
 
 from search_meta_api.errors import ErrorClass, ProviderError
 from search_meta_api.models import EffectiveRequest, SearchResult
-from search_meta_api.providers.base import Adapter, Capabilities
+from search_meta_api.providers.base import Adapter, Capabilities, build_results
 
 ENDPOINT = "https://api.linkup.so/v1/search"
 
@@ -2914,20 +2940,19 @@ class LinkupAdapter(Adapter):
         if not isinstance(rows, list):
             raise ProviderError(self.name, ErrorClass.MALFORMED, status=200,
                                 message="missing 'results' array")
-        results = []
-        for row in rows:
-            if row.get("type") != "text" or not row.get("url"):
-                continue
-            results.append(SearchResult(
+        # Linkup returns a mixed text/image list; images are not search results.
+        return build_results(
+            rows,
+            limit,
+            lambda row, rank: SearchResult(
                 title=row.get("name") or "",
                 url=row["url"],
                 snippet=row.get("content") or "",
-                rank=len(results) + 1,
+                rank=rank,
                 favicon=row.get("favicon"),
-            ))
-            if len(results) == limit:
-                break
-        return results
+            ),
+            keep=lambda row: row.get("type") == "text" and bool(row.get("url")),
+        )
 ```
 
 - [ ] **Step 4: Register it**
@@ -3111,7 +3136,9 @@ from typing import Any
 
 from search_meta_api.errors import ErrorClass, ProviderError
 from search_meta_api.models import EffectiveRequest, SearchResult
-from search_meta_api.providers.base import Adapter, Capabilities, domain_operators
+from search_meta_api.providers.base import (
+    Adapter, Capabilities, build_results, domain_operators,
+)
 
 ENDPOINT = "https://api.firecrawl.dev/v2/search"
 
@@ -3165,17 +3192,13 @@ class FirecrawlAdapter(Adapter):
 
     def _parse(self, body: dict[str, Any], source: str, limit: int) -> list[SearchResult]:
         rows = (body.get("data") or {}).get(source) or []
-        return [
-            SearchResult(
-                title=row.get("title") or "",
-                url=row["url"],
-                snippet=row.get("description") or row.get("snippet") or "",
-                rank=index + 1,
-                published_date=row.get("date"),
-            )
-            for index, row in enumerate(rows[:limit])
-            if row.get("url")
-        ]
+        return build_results(rows, limit, lambda row, rank: SearchResult(
+            title=row.get("title") or "",
+            url=row["url"],
+            snippet=row.get("description") or row.get("snippet") or "",
+            rank=rank,
+            published_date=row.get("date"),
+        ))
 ```
 
 - [ ] **Step 4: Register it**
@@ -3372,7 +3395,9 @@ import httpx
 
 from search_meta_api.errors import ErrorClass, classify_status
 from search_meta_api.models import EffectiveRequest, SearchResult
-from search_meta_api.providers.base import Adapter, Capabilities, domain_operators
+from search_meta_api.providers.base import (
+    Adapter, Capabilities, build_results, domain_operators,
+)
 
 ENDPOINT = "https://www.googleapis.com/customsearch/v1"
 
@@ -3443,16 +3468,19 @@ class GoogleCseAdapter(Adapter):
 
     def _parse(self, body: dict[str, Any], limit: int) -> list[SearchResult]:
         rows = body.get("items") or []
-        return [
-            SearchResult(
+        # Google names the URL field `link`, so the default keep predicate
+        # (which looks for `url`) would discard every row.
+        return build_results(
+            rows,
+            limit,
+            lambda row, rank: SearchResult(
                 title=row.get("title") or "",
                 url=row["link"],
                 snippet=row.get("snippet") or "",
-                rank=index + 1,
-            )
-            for index, row in enumerate(rows[:limit])
-            if row.get("link")
-        ]
+                rank=rank,
+            ),
+            keep=lambda row: bool(row.get("link")),
+        )
 ```
 
 - [ ] **Step 4: Register it**
@@ -3635,7 +3663,9 @@ from typing import Any
 
 from search_meta_api.errors import ErrorClass, ProviderError
 from search_meta_api.models import EffectiveRequest, SearchResult
-from search_meta_api.providers.base import Adapter, Capabilities, domain_operators
+from search_meta_api.providers.base import (
+    Adapter, Capabilities, build_results, domain_operators,
+)
 
 # SearXNG offers day/month/year windows. There is no week.
 TIME_RANGES = {"day": "day", "month": "month", "year": "year"}
@@ -3683,18 +3713,14 @@ class SearxngAdapter(Adapter):
         if not isinstance(rows, list):
             raise ProviderError(self.name, ErrorClass.MALFORMED, status=200,
                                 message="missing 'results' array")
-        return [
-            SearchResult(
-                title=row.get("title") or "",
-                url=row["url"],
-                snippet=row.get("content") or "",
-                rank=index + 1,
-                score=row.get("score"),
-                published_date=row.get("publishedDate"),
-            )
-            for index, row in enumerate(rows[:limit])
-            if row.get("url")
-        ]
+        return build_results(rows, limit, lambda row, rank: SearchResult(
+            title=row.get("title") or "",
+            url=row["url"],
+            snippet=row.get("content") or "",
+            rank=rank,
+            score=row.get("score"),
+            published_date=row.get("publishedDate"),
+        ))
 ```
 
 - [ ] **Step 4: Register it**
@@ -3761,7 +3787,7 @@ import httpx
 import pytest
 
 from search_meta_api.models import SearchRequest
-from search_meta_api.providers.base import Adapter, Capabilities
+from search_meta_api.providers.base import Adapter, Capabilities, build_results
 from search_meta_api.router import ProviderInstance
 from search_meta_api.validation import ParamError, validate_params
 
@@ -3941,7 +3967,7 @@ from search_meta_api.app import create_app
 from search_meta_api.config import Settings
 from search_meta_api.errors import ErrorClass, ProviderError
 from search_meta_api.models import SearchResult
-from search_meta_api.providers.base import Adapter, Capabilities
+from search_meta_api.providers.base import Adapter, Capabilities, build_results
 from search_meta_api.router import ProviderInstance
 
 SETTINGS_NO_AUTH = Settings(providers=[{"name": "fake-a", "type": "tavily",
