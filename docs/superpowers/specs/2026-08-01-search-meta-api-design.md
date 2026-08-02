@@ -364,7 +364,16 @@ Development is test-first per the project's TDD practice.
 ## 14. Deferred
 
 - `POST /extract` — URL → content, second capability on the same router, when
-  the existing extraction service gets consolidated in.
+  the existing extraction service gets consolidated in. That service already
+  runs on the home server:
+  - API: `https://scrape-api.local.alban.me`
+  - Docs: `https://scrape.local.alban.me/docs.md`
+
+  Folding it in means adding an `extract` capability registry alongside
+  `search` and writing adapters for it — the router itself needs no change,
+  which is the whole reason it was built capability-agnostic. Candidate
+  providers for that registry, beyond the existing service: Tavily `/extract`,
+  Exa `/contents`, Firecrawl `/scrape`, TinyFish Web Fetch, Jina Reader.
 - Response caching keyed on the normalised request.
 - Per-provider cost accounting (Exa reports `costDollars`, Firecrawl
   `creditsUsed`, Tavily `usage.credits`; all three are currently discarded).
