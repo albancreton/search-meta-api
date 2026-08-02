@@ -1,0 +1,29 @@
+from __future__ import annotations
+
+from typing import Any
+
+import httpx
+
+from search_meta_api.providers.base import Adapter
+from search_meta_api.providers.tavily import TavilyAdapter
+
+ADAPTERS: dict[str, type[Adapter]] = {
+    TavilyAdapter.type_name: TavilyAdapter,
+}
+
+# Options each type must be given in config, beyond name/type.
+REQUIRED_OPTIONS: dict[str, tuple[str, ...]] = {
+    "tavily": ("api_key",),
+}
+
+OPTION_FIELDS = ("api_key", "base_url", "cx")
+
+
+def build_adapter(cfg: Any, client: httpx.AsyncClient, default_timeout_ms: int) -> Adapter:
+    options = {f: getattr(cfg, f) for f in OPTION_FIELDS if getattr(cfg, f, None) is not None}
+    return ADAPTERS[cfg.type](
+        cfg.name,
+        client,
+        timeout_ms=cfg.timeout_ms or default_timeout_ms,
+        **options,
+    )

@@ -1,0 +1,25 @@
+# Copy to config.yaml and fill in real keys. config.yaml is gitignored.
+server:
+  auth_token: "changeme"        # remove or set null to disable auth entirely
+  request_deadline_ms: 30000
+
+defaults:
+  timeout_ms: 10000
+  max_results: 10
+
+breaker:
+  fault_threshold: 3
+  cooldown_ms: 60000
+  quota_cooldown_ms: 300000
+
+# Order is failover order.
+providers:
+  - {name: tavily-a,  type: tavily,     api_key: "tvly-REPLACE-A"}
+  - {name: tavily-b,  type: tavily,     api_key: "tvly-REPLACE-B", timeout_ms: 15000}
+  - {name: tinyfish,  type: tinyfish,   api_key: "REPLACE"}
+  - {name: brave,     type: brave,      api_key: "REPLACE"}
+  - {name: exa,       type: exa,        api_key: "REPLACE"}
+  - {name: linkup,    type: linkup,     api_key: "REPLACE"}
+  - {name: firecrawl, type: firecrawl,  api_key: "fc-REPLACE"}
+  - {name: google,    type: google_cse, api_key: "REPLACE", cx: "REPLACE"}
+  - {name: searxng,   type: searxng,    base_url: "https://xng.xmpl.me"}
