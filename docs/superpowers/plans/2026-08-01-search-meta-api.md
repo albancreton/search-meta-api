@@ -3931,8 +3931,14 @@ class ParamError(ValueError):
 
 
 def _flat_is_set(req: SearchRequest, name: str) -> bool:
-    default = UnifiedFilters.model_fields[name].get_default(call_default_factory=True)
-    return getattr(req, name) != default
+    """Did the caller supply this field?
+
+    `model_fields_set`, not a comparison against the model default. Comparing
+    values gets it wrong twice: it misses a genuine conflict where the caller
+    sends a value that happens to equal the default, and it produces a bogus
+    conflict for any field the app has already written to before validation.
+    """
+    return name in req.model_fields_set
 
 
 def validate_params(req: SearchRequest, instances: Sequence[ProviderInstance]) -> None:
@@ -4232,14 +4238,21 @@ def create_app(
               dependencies=[Depends(require_auth)])
     async def search(req: SearchRequest, request: Request) -> SearchResponse:
         state = request.app.state
-        # An omitted max_results takes the deployment's configured default;
-        # an explicit one always wins.
-        if "max_results" not in req.model_fields_set:
-            req.max_results = state.settings.defaults.max_results
+        # Validate the caller's request as they actually sent it, THEN apply
+        # deployment defaults. Assigning to a pydantic model adds the field to
+        # model_fields_set, so filling the default first would make validation
+        # believe the caller supplied max_results and reject a legitimate
+        # '*/max_results' as a duplicate — but only on deployments that tune
+        # defaults.max_results away from the model default.
         try:
             validate_params(req, state.instances)
         except ParamError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        # An omitted max_results takes the deployment's configured default;
+        # an explicit one always wins.
+        if "max_results" not in req.model_fields_set:
+            req.max_results = state.settings.defaults.max_results
 
         async def attempt(instance: ProviderInstance):
             adapter = instance.adapter
