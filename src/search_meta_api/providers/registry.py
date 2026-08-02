@@ -6,14 +6,17 @@ import httpx
 
 from search_meta_api.providers.base import Adapter
 from search_meta_api.providers.tavily import TavilyAdapter
+from search_meta_api.providers.tinyfish import TinyFishAdapter
 
 ADAPTERS: dict[str, type[Adapter]] = {
     TavilyAdapter.type_name: TavilyAdapter,
+    TinyFishAdapter.type_name: TinyFishAdapter,
 }
 
 # Options each type must be given in config, beyond name/type.
 REQUIRED_OPTIONS: dict[str, tuple[str, ...]] = {
     "tavily": ("api_key",),
+    "tinyfish": ("api_key",),
 }
 
 OPTION_FIELDS = ("api_key", "base_url", "cx")
