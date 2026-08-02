@@ -8,6 +8,7 @@ from search_meta_api.providers.base import Adapter
 from search_meta_api.providers.brave import BraveAdapter
 from search_meta_api.providers.exa import ExaAdapter
 from search_meta_api.providers.firecrawl import FirecrawlAdapter
+from search_meta_api.providers.google_cse import GoogleCseAdapter
 from search_meta_api.providers.linkup import LinkupAdapter
 from search_meta_api.providers.tavily import TavilyAdapter
 from search_meta_api.providers.tinyfish import TinyFishAdapter
@@ -16,6 +17,7 @@ ADAPTERS: dict[str, type[Adapter]] = {
     BraveAdapter.type_name: BraveAdapter,
     ExaAdapter.type_name: ExaAdapter,
     FirecrawlAdapter.type_name: FirecrawlAdapter,
+    GoogleCseAdapter.type_name: GoogleCseAdapter,
     LinkupAdapter.type_name: LinkupAdapter,
     TavilyAdapter.type_name: TavilyAdapter,
     TinyFishAdapter.type_name: TinyFishAdapter,
@@ -26,6 +28,7 @@ REQUIRED_OPTIONS: dict[str, tuple[str, ...]] = {
     "brave": ("api_key",),
     "exa": ("api_key",),
     "firecrawl": ("api_key",),
+    "google_cse": ("api_key", "cx"),
     "linkup": ("api_key",),
     "tavily": ("api_key",),
     "tinyfish": ("api_key",),
