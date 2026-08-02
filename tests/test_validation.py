@@ -2,7 +2,7 @@ import httpx
 import pytest
 
 from search_meta_api.models import SearchRequest
-from search_meta_api.providers.base import Adapter, Capabilities, build_results
+from search_meta_api.providers.base import Adapter, Capabilities
 from search_meta_api.router import ProviderInstance
 from search_meta_api.validation import ParamError, validate_params
 

@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Callable, ClassVar, Mapping, Sequence
+from typing import Any, ClassVar
 
 import httpx
 
 from search_meta_api.errors import ErrorClass, ProviderError, classify_status
 from search_meta_api.models import (
-    FILTER_FIELDS, UNIFIED_FIELDS, EffectiveRequest, SearchRequest, SearchResult, UnifiedFilters,
+    FILTER_FIELDS,
+    UNIFIED_FIELDS,
+    EffectiveRequest,
+    SearchRequest,
+    SearchResult,
+    UnifiedFilters,
 )
 
 UNIVERSAL_SCOPE = "*"

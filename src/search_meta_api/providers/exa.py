@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import date
-from typing import Any, Mapping
+from typing import Any
 
 from search_meta_api.errors import ErrorClass, ProviderError
 from search_meta_api.models import EffectiveRequest, SearchResult

@@ -7,7 +7,10 @@ import httpx
 from search_meta_api.errors import ErrorClass, classify_status
 from search_meta_api.models import EffectiveRequest, SearchResult
 from search_meta_api.providers.base import (
-    Adapter, Capabilities, build_results, domain_operators,
+    Adapter,
+    Capabilities,
+    build_results,
+    domain_operators,
 )
 
 ENDPOINT = "https://www.googleapis.com/customsearch/v1"

@@ -5,7 +5,11 @@ import respx
 from search_meta_api.errors import ErrorClass, ProviderError
 from search_meta_api.models import SearchRequest, SearchResult
 from search_meta_api.providers.base import (
-    Adapter, Capabilities, build_results, domain_operators, resolve_request,
+    Adapter,
+    Capabilities,
+    build_results,
+    domain_operators,
+    resolve_request,
 )
 
 CAPS = Capabilities(
@@ -20,7 +24,7 @@ def resolve(req):
 
 
 def test_flat_fields_pass_through_untouched():
-    eff, passthrough, degraded = resolve(SearchRequest(query="hi", country="fr"))
+    eff, passthrough, _degraded = resolve(SearchRequest(query="hi", country="fr"))
     assert eff.query == "hi" and eff.country == "fr"
     assert passthrough == {}
 

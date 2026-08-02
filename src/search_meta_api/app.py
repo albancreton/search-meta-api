@@ -3,8 +3,9 @@ from __future__ import annotations
 import logging
 import os
 import secrets
+from collections.abc import Sequence
 from contextlib import asynccontextmanager
-from typing import Any, Sequence
+from typing import Any
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request

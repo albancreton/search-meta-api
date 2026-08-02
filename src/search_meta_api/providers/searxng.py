@@ -5,7 +5,10 @@ from typing import Any
 from search_meta_api.errors import ErrorClass, ProviderError
 from search_meta_api.models import EffectiveRequest, SearchResult
 from search_meta_api.providers.base import (
-    Adapter, Capabilities, build_results, domain_operators,
+    Adapter,
+    Capabilities,
+    build_results,
+    domain_operators,
 )
 
 # SearXNG offers day/month/year windows. There is no week.

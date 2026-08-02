@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Sequence
+from typing import Any
 
 from search_meta_api.breaker import CircuitBreaker
 from search_meta_api.errors import ErrorClass, ProviderError

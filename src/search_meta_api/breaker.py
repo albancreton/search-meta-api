@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
 from enum import StrEnum
-from typing import Callable
 
 from search_meta_api.errors import ErrorClass
 

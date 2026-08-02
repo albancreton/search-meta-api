@@ -1,11 +1,10 @@
 import httpx
-import pytest
 
 from search_meta_api.app import create_app
 from search_meta_api.config import Settings
 from search_meta_api.errors import ErrorClass, ProviderError
 from search_meta_api.models import SearchResult
-from search_meta_api.providers.base import Adapter, Capabilities, build_results
+from search_meta_api.providers.base import Adapter, Capabilities
 from search_meta_api.router import ProviderInstance
 
 SETTINGS_NO_AUTH = Settings(providers=[{"name": "fake-a", "type": "tavily",

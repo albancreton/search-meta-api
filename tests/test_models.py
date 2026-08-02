@@ -1,9 +1,14 @@
-import pytest
 from datetime import date
+
+import pytest
 from pydantic import ValidationError
 
 from search_meta_api.models import (
-    FILTER_FIELDS, UNIFIED_FIELDS, EffectiveRequest, SearchRequest, SearchResult,
+    FILTER_FIELDS,
+    UNIFIED_FIELDS,
+    EffectiveRequest,
+    SearchRequest,
+    SearchResult,
 )
 
 

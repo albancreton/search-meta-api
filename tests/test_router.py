@@ -1,4 +1,3 @@
-import pytest
 
 from search_meta_api.breaker import BreakerSettings, CircuitBreaker
 from search_meta_api.errors import ErrorClass, ProviderError
