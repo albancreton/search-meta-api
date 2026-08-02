@@ -122,16 +122,35 @@ per-vendor detail in the research doc):
 |---|---|---|---|---|---|---|---|---|
 | `query` | `query` | `q` | `query` | `q` | `query` | `query` | `q` | `q` |
 | `max_results` | `max_results` ≤20 | `count` ≤20 | `numResults` ≤100 | `maxResults` | `limit` ≤100 | — | `num` ≤10 | — |
-| `include_domains` | `include_domains` | `site:` ops | `includeDomains` | `includeDomains` | `includeDomains` | — | `siteSearch`+`i` (1 only) | — |
-| `exclude_domains` | `exclude_domains` | `-site:` ops | `excludeDomains` | `excludeDomains` | `excludeDomains` | — | `siteSearch`+`e` (1 only) | — |
+| `include_domains` | `include_domains` | `site:` ops | `includeDomains` | `includeDomains` | `includeDomains` | — | `site:` ops | `site:` ops |
+| `exclude_domains` | `exclude_domains` | `-site:` ops | `excludeDomains` | `excludeDomains` | `-site:` ops | — | `-site:` ops | `-site:` ops |
 | `freshness` | `time_range` | `freshness` | — | — | `tbs=qdr:*` | `recency_minutes` | `dateRestrict` | `time_range` |
 | `start/end_date` | `start_date`/`end_date` | `freshness` range | `startPublishedDate`/… | `fromDate`/`toDate` | — | `after_date`/`before_date` | — | — |
-| `country` | `country` | `country` | `userLocation` | — | `country` | `location` | `gl` | — |
+| `country` | `country` | `country` | `userLocation` | — | `country` | —¹ | `gl` | — |
 | `language` | — | `search_lang` | — | — | — | `language` | `lr` | `language` |
-| `safe_search` | `safe_search` | `safesearch` | `moderation` | — | — | — | `safe` | `safesearch` |
+| `safe_search` | —² | `safesearch` | `moderation` | — | — | — | `safe` | `safesearch` |
 | `topic` | `topic` | — | `category` | — | `sources` | `domain_type` | — | `categories` |
 
 Where a cell is `—`, the adapter drops that filter and reports it (§9).
+
+¹ TinyFish's `location` passthrough parameter takes region identifiers, not
+ISO country codes — guessing a mapping from `country` would mislead callers,
+so it is not translated. Reachable only as `tinyfish/location` passthrough;
+the shared name is coincidence, not a translation.
+
+² Tavily gates `safe_search` to enterprise plans; sending it on a standard
+key risks a 400 on every request, so it is not translated automatically.
+Reachable as `tavily/safe_search` passthrough for enterprise keys.
+
+`include_domains`/`exclude_domains` for google_cse and searxng are genuinely
+honoured, not dropped — both fold domains into the query as `site:`/`-site:`
+search operators (`domain_operators`), the same mechanism Brave uses, rather
+than a dedicated API parameter: Google's `siteSearch` only accepts a single
+domain, so operators do the work instead and support any number of domains.
+Firecrawl treats the two directions differently: `include_domains` goes
+through as a real `includeDomains` parameter, but `exclude_domains` is
+folded into the query as `-site:` operators instead, because the vendor's
+`includeDomains` and `excludeDomains` parameters are mutually exclusive.
 
 ## 7. Namespaced parameters
 
@@ -202,7 +221,7 @@ router is the provider's problem, not the caller's. There is therefore no
 |---|---|---|---|
 | `TRANSIENT` | 5xx, 408, connect/read timeout | fault | standard |
 | `AUTH` | 401, 403 | fault | standard, logged at ERROR — a dead key needs a human |
-| `QUOTA` | 402, 429, 432, 433, Google `dailyLimitExceeded`/`rateLimitExceeded` | fault | **extended** — guaranteed to fail again |
+| `QUOTA` | 402, 429, 432, 433, Google `dailyLimitExceeded`/`rateLimitExceeded` | fault — **opens the breaker immediately**, bypassing `fault_threshold` | **extended** — guaranteed to fail again |
 | `MALFORMED` | 200 but unparseable; Firecrawl `success: false`; unexpected 400 | fault | standard |
 | `EMPTY` | 200, zero results | **no fault** | — |
 
@@ -216,7 +235,9 @@ error, not a transient one.
 Per provider **instance** — `tavily-a` and `tavily-b` are independent despite
 sharing an adapter.
 
-- `closed` → 3 consecutive faults → `open`
+- `closed` → 3 consecutive faults → `open` — except a single `QUOTA` fault
+  opens it immediately, bypassing `fault_threshold` entirely: a quota error
+  is guaranteed to recur, so there is nothing to learn from two more tries
 - `open` → skipped entirely; after the cooldown → `half-open`
 - `half-open` → admits exactly one probe; success → `closed`, fault → `open`
 - Cooldown: 60s standard, 300s for `QUOTA`, or the vendor's `Retry-After` when
