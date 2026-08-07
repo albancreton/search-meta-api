@@ -656,8 +656,6 @@ own client will not follow."
 Append to `tests/test_mcp.py`:
 
 ```python
-from mcp.shared.exceptions import MCPError
-
 from search_meta_api.config import Settings as _Settings
 
 SETTINGS_AUTH = _Settings(server={"auth_token": "s3cret"},
@@ -672,17 +670,26 @@ async def test_the_configured_token_is_accepted():
     assert result.structured_content["provider"] == "a"
 
 
-async def test_a_wrong_token_is_rejected_before_the_protocol_starts():
+async def test_a_wrong_token_is_rejected_with_a_401():
     app = create_app(SETTINGS_AUTH, instances=[hit("a", [])])
-    with pytest.raises((MCPError, ExceptionGroup, Exception)):
+    response = await _raw_mcp_post(app, {"Authorization": "Bearer wrong"})
+    assert response.status_code == 401
+
+
+async def test_a_missing_token_is_rejected_with_a_401():
+    app = create_app(SETTINGS_AUTH, instances=[hit("a", [])])
+    response = await _raw_mcp_post(app, {})
+    assert response.status_code == 401
+
+
+async def test_the_protocol_handshake_cannot_complete_without_a_token():
+    """The 401 tests above pin the status; this pins the consequence — no
+    session, so no tools. Asserted separately because a `pytest.raises` on
+    the session alone would also pass if the endpoint broke outright.
+    """
+    app = create_app(SETTINGS_AUTH, instances=[hit("a", [])])
+    with pytest.raises(BaseException):
         async with mcp_session(app, token="wrong"):
-            pass
-
-
-async def test_a_missing_token_is_rejected():
-    app = create_app(SETTINGS_AUTH, instances=[hit("a", [])])
-    with pytest.raises((MCPError, ExceptionGroup, Exception)):
-        async with mcp_session(app):
             pass
 
 
@@ -777,10 +784,10 @@ Then change the returned route's endpoint:
 - [ ] **Step 4: Run the tests**
 
 Run: `.venv/bin/pytest tests/test_mcp.py -v`
-Expected: PASS — 11 tests.
+Expected: PASS — 12 tests.
 
 Then the full suite: `.venv/bin/pytest -q`
-Expected: 308 passed.
+Expected: 309 passed.
 
 - [ ] **Step 5: Lint and commit**
 
@@ -874,10 +881,10 @@ Extend the `service` import to `from search_meta_api.service import AllProviders
 - [ ] **Step 4: Run the tests**
 
 Run: `.venv/bin/pytest tests/test_mcp.py -v`
-Expected: PASS — 14 tests.
+Expected: PASS — 15 tests.
 
 Then the full suite: `.venv/bin/pytest -q`
-Expected: 311 passed.
+Expected: 312 passed.
 
 - [ ] **Step 5: Lint and commit**
 
@@ -956,7 +963,7 @@ Expected: `MCP_PATH = "/mcp"`
 - [ ] **Step 3: Run the full suite once more**
 
 Run: `.venv/bin/pytest -q`
-Expected: 311 passed.
+Expected: 312 passed.
 
 - [ ] **Step 4: Commit**
 
