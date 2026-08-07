@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 from datetime import date
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import FastAPI
 from mcp.server.mcpserver import MCPServer
 from mcp.server.streamable_http_manager import StreamableHTTPASGIApp
 from mcp.server.transport_security import TransportSecuritySettings
+from pydantic import Field
 from starlette.routing import Route
 
 from search_meta_api.models import (
@@ -78,7 +79,7 @@ def build_mcp_route(app: FastAPI) -> Route:
         language: str | None = None,
         safe_search: SafeSearch | None = None,
         topic: Topic | None = None,
-        params: dict[str, Any] | None = None,
+        params: Annotated[dict[str, Any] | None, Field(description=PARAMS_DESCRIPTION)] = None,
     ) -> SearchResponse:
         # Omitted arguments must stay out of model_fields_set: an argument that
         # merely defaulted to None here would otherwise look caller-supplied

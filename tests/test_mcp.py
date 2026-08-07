@@ -40,6 +40,7 @@ async def test_tools_list_advertises_search_with_the_flat_schema():
         properties = tools["search"].input_schema["properties"]
         assert {"query", "max_results", "freshness", "country", "params"} <= set(properties)
         assert tools["search"].input_schema["required"] == ["query"]
+        assert "scope/name" in properties["params"]["description"]
         assert tools["search"].description
 
 
