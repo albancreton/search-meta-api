@@ -19,7 +19,7 @@ from search_meta_api.models import (
     SearchResponse,
     Topic,
 )
-from search_meta_api.service import AllProvidersFailed, run_search
+from search_meta_api.service import AllProvidersFailed, describe_providers, run_search
 from search_meta_api.validation import ParamError
 
 MCP_PATH = "/mcp"
@@ -39,6 +39,14 @@ deadline fired, so providers further down were never asked. An empty \
 `results` with `truncated` true does NOT mean the query has no answers.
 
 An empty result set is a legitimate answer, not a failure.\
+"""
+
+LIST_PROVIDERS_DESCRIPTION = """\
+List the configured search providers in failover order. Returns each \
+instance's name, adapter type, circuit-breaker state, the unified filters it \
+can honour, its result cap, and the vendor-specific passthrough params it \
+accepts. Call this before using the `params` argument of `search`, and to \
+understand why a search reported a filter as degraded.\
 """
 
 PARAMS_DESCRIPTION = """\
@@ -152,6 +160,10 @@ def build_mcp_route(app: FastAPI) -> Route:
             # rather than dropped. The agent needs the attempts to tell a
             # quota-exhausted chain from a misconfigured one.
             raise ValueError(f"all_providers_failed: {json.dumps(exc.payload)}") from exc
+
+    @mcp.tool(description=LIST_PROVIDERS_DESCRIPTION)
+    async def list_providers() -> dict[str, Any]:
+        return describe_providers(app.state)
 
     # Constructs the session manager as a side effect; the returned Starlette
     # app is deliberately discarded. Mounting it would put the endpoint at

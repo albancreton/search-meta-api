@@ -171,6 +171,39 @@ async def test_the_endpoint_is_open_when_no_token_is_configured():
         assert (await session.list_tools()).tools
 
 
+async def test_list_providers_reports_the_chain_in_failover_order():
+    """An agent cannot write a scoped param like `tavily/search_depth` without
+    first discovering that a tavily-typed instance exists and accepts it.
+    """
+    app = create_app(SETTINGS_NO_AUTH, instances=[hit("a", []), hit("b", [])])
+    async with mcp_session(app) as session:
+        result = await session.call_tool("list_providers", {})
+    assert result.is_error is False
+    providers = result.structured_content["providers"]
+    assert [p["name"] for p in providers] == ["a", "b"]
+    assert providers[0]["type"] == "tavily"
+    assert providers[0]["supported_filters"] == ["country"]
+    assert providers[0]["max_results_cap"] == 20
+    assert providers[0]["passthrough_params"] == ["chunks_per_source", "search_depth"]
+    assert providers[0]["state"]
+
+
+async def test_list_providers_is_advertised_with_no_required_arguments():
+    app = create_app(SETTINGS_NO_AUTH, instances=[hit("a", [])])
+    async with mcp_session(app) as session:
+        tools = {t.name: t for t in (await session.list_tools()).tools}
+    assert set(tools) == {"search", "list_providers"}
+    assert not tools["list_providers"].input_schema.get("required")
+    assert tools["list_providers"].description
+
+
+async def test_list_providers_needs_the_token_too():
+    app = create_app(SETTINGS_AUTH, instances=[hit("a", [])])
+    async with mcp_session(app, token="s3cret") as session:
+        result = await session.call_tool("list_providers", {})
+    assert result.is_error is False
+
+
 async def _raw_mcp_post(app, headers):
     """POST to /mcp below the protocol layer, to observe the HTTP status."""
     async with app.state.mcp_session_manager.run():
