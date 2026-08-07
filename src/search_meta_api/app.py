@@ -4,7 +4,7 @@ import logging
 import os
 import secrets
 from collections.abc import Sequence
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
 
 import httpx
@@ -12,6 +12,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 
 from search_meta_api.breaker import CircuitBreaker
 from search_meta_api.config import Settings, load_settings
+from search_meta_api.mcp_server import build_mcp_route
 from search_meta_api.models import SearchRequest, SearchResponse
 from search_meta_api.providers.registry import build_adapter
 from search_meta_api.router import ProviderInstance
@@ -38,8 +39,9 @@ def require_auth(request: Request) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings: Settings = app.state.settings
-    if app.state.instances is None:
-        async with httpx.AsyncClient() as client:
+    async with AsyncExitStack() as stack:
+        if app.state.instances is None:
+            client = await stack.enter_async_context(httpx.AsyncClient())
             app.state.instances = [
                 ProviderInstance(
                     cfg.name,
@@ -47,8 +49,11 @@ async def lifespan(app: FastAPI):
                 )
                 for cfg in settings.providers
             ]
-            yield
-    else:
+        # The MCP session manager needs a running task group before it can
+        # serve a request, and FastAPI does not propagate lifespan into
+        # mounted apps. Without this, every /mcp call fails with
+        # "Task group is not initialized".
+        await stack.enter_async_context(app.state.mcp_session_manager.run())
         yield
 
 
@@ -86,6 +91,7 @@ def create_app(
     async def providers(request: Request) -> dict[str, Any]:
         return describe_providers(request.app.state)
 
+    app.router.routes.append(build_mcp_route(app))
     return app
 
 
