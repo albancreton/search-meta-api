@@ -2,6 +2,7 @@ import contextlib
 import json
 
 import httpx2
+import pytest
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from test_app import SETTINGS_NO_AUTH, fail, hit
@@ -110,3 +111,74 @@ async def test_the_configured_max_results_default_applies_over_mcp_too():
         result = await session.call_tool(
             "search", {"query": "cats", "params": {"*/max_results": 5}})
     assert result.is_error is False
+
+
+from search_meta_api.config import Settings as _Settings
+
+SETTINGS_AUTH = _Settings(server={"auth_token": "s3cret"},
+                          providers=[{"name": "a", "type": "tavily", "api_key": "k"}])
+
+
+async def test_the_configured_token_is_accepted():
+    app = create_app(SETTINGS_AUTH, instances=[hit("a", [("Cats", "https://a.com")])])
+    async with mcp_session(app, token="s3cret") as session:
+        result = await session.call_tool("search", {"query": "cats"})
+    assert result.is_error is False
+    assert result.structured_content["provider"] == "a"
+
+
+async def test_a_wrong_token_is_rejected_with_a_401():
+    app = create_app(SETTINGS_AUTH, instances=[hit("a", [])])
+    response = await _raw_mcp_post(app, {"Authorization": "Bearer wrong"})
+    assert response.status_code == 401
+
+
+async def test_a_missing_token_is_rejected_with_a_401():
+    app = create_app(SETTINGS_AUTH, instances=[hit("a", [])])
+    response = await _raw_mcp_post(app, {})
+    assert response.status_code == 401
+
+
+async def test_the_protocol_handshake_cannot_complete_without_a_token():
+    """The 401 tests above pin the status; this pins the consequence — no
+    session, so no tools. Asserted separately because a `pytest.raises` on
+    the session alone would also pass if the endpoint broke outright.
+    """
+    app = create_app(SETTINGS_AUTH, instances=[hit("a", [])])
+    with pytest.raises(BaseException):  # noqa: B017 -- deliberately broad, see docstring
+        async with mcp_session(app, token="wrong"):
+            pass
+
+
+async def test_a_non_ascii_token_is_rejected_rather_than_crashing():
+    """A latin-1 header full of non-ASCII bytes must be a clean 401. The HTTP
+    surface needed care here because compare_digest raises TypeError on a
+    non-ASCII str; the ASGI scope carries raw bytes, so the comparison is
+    safe by construction. This test is what keeps it that way.
+    """
+    app = create_app(SETTINGS_AUTH, instances=[hit("a", [])])
+    # httpx2 encodes str header values as ascii and raises client-side on a
+    # non-ASCII character, before the request is ever sent. Pre-encoding to
+    # latin-1 bytes here is what actually gets the non-ASCII byte onto the
+    # wire, matching what the docstring above describes.
+    response = await _raw_mcp_post(app, {"Authorization": "Bearer sécret".encode("latin-1")})
+    assert response.status_code == 401
+
+
+async def test_the_endpoint_is_open_when_no_token_is_configured():
+    app = create_app(SETTINGS_NO_AUTH, instances=[hit("a", [])])
+    async with mcp_session(app) as session:
+        assert (await session.list_tools()).tools
+
+
+async def _raw_mcp_post(app, headers):
+    """POST to /mcp below the protocol layer, to observe the HTTP status."""
+    async with app.state.mcp_session_manager.run():
+        transport = httpx2.ASGITransport(app=app)
+        async with httpx2.AsyncClient(transport=transport,
+                                      base_url="http://test") as client:
+            return await client.post(
+                "/mcp",
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                headers={"Accept": "application/json, text/event-stream", **headers},
+            )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 from datetime import date
 from typing import Annotated, Any
 
@@ -48,6 +49,44 @@ list_providers first to learn which instances exist and which passthrough \
 params each accepts. Example: {"*/freshness": "week", \
 "tavily/search_depth": "advanced"}.\
 """
+
+
+class _RequireBearer:
+    """The service's bearer check, applied to a raw ASGI app.
+
+    `require_auth` is a FastAPI dependency and cannot guard a route whose
+    endpoint is a bare ASGI app, so the rule is reapplied here. Unlike the
+    HTTP dependency it needs no encoding care: the ASGI scope carries header
+    values as raw bytes, so a non-ASCII Authorization header compares as
+    bytes and simply fails to match, which is the correct answer.
+
+    Reads the token per request rather than at build time so it tracks the
+    app's settings rather than a snapshot of them.
+    """
+
+    def __init__(self, mcp_app: Any, app: FastAPI) -> None:
+        self._mcp_app = mcp_app
+        self._app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        token = self._app.state.settings.server.auth_token
+        if token is not None:
+            headers = dict(scope.get("headers") or [])
+            presented = headers.get(b"authorization", b"")
+            if not secrets.compare_digest(presented, f"Bearer {token}".encode()):
+                # A plain 401, not a JSON-RPC error: an unauthenticated caller
+                # is not yet in a protocol conversation.
+                await send({
+                    "type": "http.response.start",
+                    "status": 401,
+                    "headers": [(b"content-type", b"text/plain; charset=utf-8")],
+                })
+                await send({
+                    "type": "http.response.body",
+                    "body": b"invalid or missing bearer token",
+                })
+                return
+        await self._mcp_app(scope, receive, send)
 
 
 def build_mcp_route(app: FastAPI) -> Route:
@@ -141,6 +180,6 @@ def build_mcp_route(app: FastAPI) -> Route:
     # answer with a protocol-shaped error instead of FastAPI's bare 405.
     return Route(
         MCP_PATH,
-        endpoint=StreamableHTTPASGIApp(mcp.session_manager),
+        endpoint=_RequireBearer(StreamableHTTPASGIApp(mcp.session_manager), app),
         methods=["POST", "GET", "DELETE"],
     )
