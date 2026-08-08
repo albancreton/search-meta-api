@@ -4,7 +4,7 @@ import logging
 import os
 import secrets
 from collections.abc import Sequence
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
 
 import httpx
@@ -12,11 +12,12 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 
 from search_meta_api.breaker import CircuitBreaker
 from search_meta_api.config import Settings, load_settings
+from search_meta_api.mcp_server import build_mcp_route
 from search_meta_api.models import SearchRequest, SearchResponse
-from search_meta_api.providers.base import resolve_request
 from search_meta_api.providers.registry import build_adapter
-from search_meta_api.router import ProviderInstance, run_failover
-from search_meta_api.validation import ParamError, validate_params
+from search_meta_api.router import ProviderInstance
+from search_meta_api.service import AllProvidersFailed, describe_providers, run_search
+from search_meta_api.validation import ParamError
 
 logging.basicConfig(level=logging.INFO)
 
@@ -38,8 +39,9 @@ def require_auth(request: Request) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings: Settings = app.state.settings
-    if app.state.instances is None:
-        async with httpx.AsyncClient() as client:
+    async with AsyncExitStack() as stack:
+        if app.state.instances is None:
+            client = await stack.enter_async_context(httpx.AsyncClient())
             app.state.instances = [
                 ProviderInstance(
                     cfg.name,
@@ -47,8 +49,11 @@ async def lifespan(app: FastAPI):
                 )
                 for cfg in settings.providers
             ]
-            yield
-    else:
+        # The MCP session manager needs a running task group before it can
+        # serve a request, and FastAPI does not propagate lifespan into
+        # mounted apps. Without this, every /mcp call fails with
+        # "Task group is not initialized".
+        await stack.enter_async_context(app.state.mcp_session_manager.run())
         yield
 
 
@@ -63,57 +68,13 @@ def create_app(
     @app.post("/search", response_model=SearchResponse,
               dependencies=[Depends(require_auth)])
     async def search(req: SearchRequest, request: Request) -> SearchResponse:
-        """Walk the configured provider chain and return the first positive result.
-
-        `server.request_deadline_ms` is a **best-effort** budget: the router
-        checks it before starting each provider attempt, but nothing interrupts
-        an attempt already in flight, so a request can overshoot the deadline
-        by up to one adapter's own timeout (10s by default).
-        """
-        state = request.app.state
+        """Walk the configured provider chain and return the first positive result."""
         try:
-            validate_params(req, state.instances)
+            return await run_search(request.app.state, req)
         except ParamError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-        # An omitted max_results takes the deployment's configured default; an
-        # explicit one always wins. This must happen AFTER validate_params:
-        # assigning to the model adds the field to model_fields_set, which
-        # would make the applied default look like a caller-supplied value
-        # and falsely conflict with a '*/max_results' override.
-        if "max_results" not in req.model_fields_set:
-            req.max_results = state.settings.defaults.max_results
-
-        async def attempt(instance: ProviderInstance):
-            adapter = instance.adapter
-            effective, passthrough, degraded = resolve_request(
-                req, instance.name, adapter.type_name, adapter.capabilities
-            )
-            degraded = sorted(set(degraded) | set(adapter.extra_degraded(effective)))
-            return await adapter.search(effective, passthrough), degraded
-
-        outcome = await run_failover(
-            state.instances, attempt, state.breaker,
-            deadline_ms=state.settings.server.request_deadline_ms,
-        )
-
-        if outcome.winner is None and not outcome.any_answer:
-            raise HTTPException(status_code=503, detail={
-                "error": "all_providers_failed",
-                "query": req.query,
-                "attempts": [a.model_dump() for a in outcome.attempts],
-                "elapsed_ms": outcome.elapsed_ms,
-            })
-
-        return SearchResponse(
-            query=req.query,
-            provider=outcome.winner,
-            results=outcome.items,
-            degraded=outcome.degraded,
-            attempts=outcome.attempts,
-            elapsed_ms=outcome.elapsed_ms,
-            truncated=outcome.truncated,
-        )
+        except AllProvidersFailed as exc:
+            raise HTTPException(status_code=503, detail=exc.payload) from exc
 
     @app.get("/health")
     async def health(request: Request) -> dict[str, Any]:
@@ -128,22 +89,9 @@ def create_app(
 
     @app.get("/providers", dependencies=[Depends(require_auth)])
     async def providers(request: Request) -> dict[str, Any]:
-        state = request.app.state
-        return {
-            "providers": [
-                {
-                    "name": i.name,
-                    "type": i.adapter.type_name,
-                    "state": str(state.breaker.state(i.name)),
-                    "supported_filters": sorted(i.adapter.capabilities.supported_filters),
-                    "max_results_cap": i.adapter.capabilities.max_results_cap,
-                    "passthrough_params": sorted(
-                        i.adapter.capabilities.passthrough_params),
-                }
-                for i in state.instances
-            ]
-        }
+        return describe_providers(request.app.state)
 
+    app.router.routes.append(build_mcp_route(app))
     return app
 
 
