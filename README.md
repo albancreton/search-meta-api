@@ -135,8 +135,9 @@ with `reason: "deadline-exceeded"`.
 capabilities, and current breaker state. `GET /docs` is FastAPI's generated
 OpenAPI page — the tool schema an agent can call directly.
 
-**Auth covers `/search` and `/providers` only.** When `server.auth_token`
-is set, those two require `Authorization: Bearer <token>`. `/health`,
+**Auth covers `/search`, `/providers` and `/mcp` only.** When
+`server.auth_token` is set, those three require `Authorization: Bearer
+<token>` (see "MCP server" below for what the token guards there). `/health`,
 `/docs`, `/openapi.json` and `/redoc` are always unauthenticated. That is
 deliberate for `/health` (a liveness probe shouldn't need a credential) and
 accepted for the schema endpoints: they publish the request/response shape,
@@ -362,7 +363,15 @@ claude mcp add --transport http search https://search.local.alban.me/mcp \
 ```
 
 Drop the `--header` if `server.auth_token` is unset — `/mcp` is then open,
-exactly as `/search` and `/providers` are.
+exactly as `/search` and `/providers` are. It is worth one extra thought
+here, though. The MCP transport's DNS-rebinding protection is switched off,
+because its default allowlist is localhost-only and would reject every
+request arriving through the reverse proxy by hostname; the bearer token is
+what stands in for it, since no browser tricked into posting at the endpoint
+carries one. With no token configured, nothing stands in for it — `/mcp` is
+then protected by the network boundary in front of it and nothing else, so
+leave the token unset only on a network you would be happy to expose the
+provider chain to.
 
 **The URL has no trailing slash.** `/mcp` is the endpoint; `/mcp/` is not.
 That's deliberate, not an oversight: the endpoint is built as a route

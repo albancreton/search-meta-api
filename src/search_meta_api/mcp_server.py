@@ -79,8 +79,14 @@ class _RequireBearer:
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         token = self._app.state.settings.server.auth_token
         if token is not None:
-            headers = dict(scope.get("headers") or [])
-            presented = headers.get(b"authorization", b"")
+            # First-wins on a duplicated header, matching Starlette's
+            # `headers.get` and therefore `require_auth` on the HTTP routes.
+            # `dict(scope["headers"])` would be last-wins, which would let each
+            # gate accept a request the other refuses.
+            presented = next(
+                (v for k, v in scope.get("headers") or [] if k == b"authorization"),
+                b"",
+            )
             if not secrets.compare_digest(presented, f"Bearer {token}".encode()):
                 # A plain 401, not a JSON-RPC error: an unauthenticated caller
                 # is not yet in a protocol conversation.
@@ -113,17 +119,22 @@ def build_mcp_route(app: FastAPI) -> Route:
         ),
     )
 
+    # The flat signature restates the bounds `UnifiedFilters` declares, because
+    # the advertised JSON schema is built from this signature alone: without
+    # them an agent can only learn the limits by making a call that fails.
+    # `tests/test_mcp.py` pins these against `models.py` so the two cannot
+    # drift apart silently.
     @mcp.tool(description=SEARCH_DESCRIPTION)
     async def search(
-        query: str,
-        max_results: int | None = None,
+        query: Annotated[str, Field(min_length=1, max_length=2000)],
+        max_results: Annotated[int | None, Field(ge=1, le=100)] = None,
         include_domains: list[str] | None = None,
         exclude_domains: list[str] | None = None,
         freshness: Freshness | None = None,
         start_date: date | None = None,
         end_date: date | None = None,
-        country: str | None = None,
-        language: str | None = None,
+        country: Annotated[str | None, Field(min_length=2, max_length=2)] = None,
+        language: Annotated[str | None, Field(min_length=2, max_length=2)] = None,
         safe_search: SafeSearch | None = None,
         topic: Topic | None = None,
         params: Annotated[dict[str, Any] | None, Field(description=PARAMS_DESCRIPTION)] = None,
@@ -146,6 +157,13 @@ def build_mcp_route(app: FastAPI) -> Route:
             ("topic", topic),
             ("params", params),
         )
+        # Known and deliberate divergence from POST /search: an explicit JSON
+        # `null` for an optional argument is treated here as if the argument
+        # had been omitted, where HTTP answers 422. Telling the two apart would
+        # mean threading `model_fields_set` out of the tool signature, and the
+        # advertised schema already declares `default: null` for each of these,
+        # so a caller sending null is asking for the default. Left as is on
+        # purpose — please don't "fix" it without revisiting that trade-off.
         for name, value in optional:
             if value is not None:
                 fields[name] = value
@@ -180,18 +198,30 @@ def build_mcp_route(app: FastAPI) -> Route:
             # The SDK's default allowlist is localhost-only, which rejects every
             # request arriving through Caddy as `search.local.alban.me`. The
             # check guards a localhost dev server against browser-forged
-            # requests; this service is reached over TLS and gated by a bearer
-            # token no browser holds.
+            # requests; this service is reached over TLS and, *when
+            # `server.auth_token` is set*, gated by a bearer token no browser
+            # holds. That token is what replaces the dropped protection, and it
+            # is optional — with no token configured the endpoint's only
+            # defence is the network boundary in front of it, so a deployment
+            # that leaves the token unset must not expose /mcp to a network
+            # where a browser could reach it.
             enable_dns_rebinding_protection=False,
         ),
     )
     app.state.mcp_session_manager = mcp.session_manager
 
-    # GET and DELETE are the transport's SSE-stream and session-termination
-    # verbs. Stateless mode serves neither, but routing them lets the MCP layer
-    # answer with a protocol-shaped error instead of FastAPI's bare 405.
+    # DELETE is the transport's session-termination verb. Stateless mode has no
+    # session to terminate, but routing it lets the MCP layer answer with a
+    # protocol-shaped error instead of FastAPI's bare 405.
+    #
+    # GET is deliberately NOT routed. It is the transport's server-to-client SSE
+    # verb, and the SDK answers it by opening a stream — which, stateless, the
+    # server never writes to and never closes, pinning a connection and a task
+    # for as long as the client holds on. Since `auth_token` is optional, that
+    # would be an unauthenticated connection-hold. Starlette's plain 405 is the
+    # honest answer.
     return Route(
         MCP_PATH,
         endpoint=_RequireBearer(StreamableHTTPASGIApp(mcp.session_manager), app),
-        methods=["POST", "GET", "DELETE"],
+        methods=["POST", "DELETE"],
     )

@@ -13,7 +13,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.3", "pytest-asyncio>=0.24", "respx>=0.22", "ruff>=0.8"]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "respx>=0.22",
+    "ruff>=0.8",
+    # tests/test_mcp.py drives the app in-process over httpx2's ASGI transport.
+    # It arrives transitively via `mcp`, but the tests import it directly, so
+    # it is declared here rather than left to that.
+    "httpx2>=2.9",
+]
 
 [build-system]
 requires = ["setuptools>=68"]

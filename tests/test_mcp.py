@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import json
 
@@ -10,6 +11,10 @@ from test_app import SETTINGS_NO_AUTH, fail, hit
 from search_meta_api.app import create_app
 from search_meta_api.config import Settings
 from search_meta_api.errors import ErrorClass
+from search_meta_api.models import UnifiedFilters
+
+SETTINGS_AUTH = Settings(server={"auth_token": "s3cret"},
+                         providers=[{"name": "a", "type": "tavily", "api_key": "k"}])
 
 
 @contextlib.asynccontextmanager
@@ -43,6 +48,31 @@ async def test_tools_list_advertises_search_with_the_flat_schema():
         assert tools["search"].input_schema["required"] == ["query"]
         assert "scope/name" in properties["params"]["description"]
         assert tools["search"].description
+        # The bounds must survive into the advertised schema, or an agent
+        # discovers them only by making a call that fails. Read from the model
+        # rather than restated, so the two cannot drift apart.
+        assert properties["query"]["maxLength"] == _bound(UnifiedFilters, "query", "max_length")
+        assert properties["query"]["minLength"] == _bound(UnifiedFilters, "query", "min_length")
+        integer, = [s for s in properties["max_results"]["anyOf"] if s["type"] == "integer"]
+        assert integer["minimum"] == _bound(UnifiedFilters, "max_results", "ge")
+        assert integer["maximum"] == _bound(UnifiedFilters, "max_results", "le")
+        string, = [s for s in properties["country"]["anyOf"] if s["type"] == "string"]
+        assert string["maxLength"] == _bound(UnifiedFilters, "country", "max_length")
+
+
+def _bound(model, field, constraint):
+    """The value of a pydantic constraint as declared on `model`.
+
+    Constraints reach the field as annotated_types markers (`MinLen`, `Ge`, …)
+    whose single attribute is named after the marker, not after the `Field`
+    keyword that produced them; this maps back from the keyword.
+    """
+    attribute = {"min_length": "min_length", "max_length": "max_length",
+                 "ge": "ge", "le": "le"}[constraint]
+    for marker in model.model_fields[field].metadata:
+        if hasattr(marker, attribute):
+            return getattr(marker, attribute)
+    raise AssertionError(f"{model.__name__}.{field} declares no {constraint}")
 
 
 async def test_search_returns_the_same_payload_as_the_http_route():
@@ -113,12 +143,6 @@ async def test_the_configured_max_results_default_applies_over_mcp_too():
     assert result.is_error is False
 
 
-from search_meta_api.config import Settings as _Settings
-
-SETTINGS_AUTH = _Settings(server={"auth_token": "s3cret"},
-                          providers=[{"name": "a", "type": "tavily", "api_key": "k"}])
-
-
 async def test_the_configured_token_is_accepted():
     app = create_app(SETTINGS_AUTH, instances=[hit("a", [("Cats", "https://a.com")])])
     async with mcp_session(app, token="s3cret") as session:
@@ -145,7 +169,10 @@ async def test_the_protocol_handshake_cannot_complete_without_a_token():
     the session alone would also pass if the endpoint broke outright.
     """
     app = create_app(SETTINGS_AUTH, instances=[hit("a", [])])
-    with pytest.raises(BaseException):  # noqa: B017 -- deliberately broad, see docstring
+    # The client's task group surfaces the transport's failure wrapped, so
+    # ExceptionGroup is the type actually raised — narrow enough to fail if the
+    # handshake ever starts succeeding, and it will not swallow a CancelledError.
+    with pytest.raises(ExceptionGroup):
         async with mcp_session(app, token="wrong"):
             pass
 
@@ -215,6 +242,106 @@ async def test_list_providers_is_refused_without_the_token():
         "params": {"name": "list_providers", "arguments": {}},
     })
     assert response.status_code == 401
+
+
+async def test_the_apps_own_lifespan_makes_mcp_work():
+    """Every other test in this file enters the session manager itself, because
+    httpx's ASGI transport sends no lifespan events — which means none of them
+    exercise the `enter_async_context(...run())` line in app.lifespan, the only
+    thing that starts the manager in production. This one drives the real ASGI
+    lifespan instead, so removing that line fails here and nowhere else.
+    """
+    app = create_app(SETTINGS_NO_AUTH, instances=[hit("a", [])])
+    # A queue, not a preloaded list: the server asks for the next lifespan
+    # message as soon as startup finishes, and handing it the shutdown right
+    # away would tear the app down before the request below is ever made.
+    inbox: asyncio.Queue = asyncio.Queue()
+    received: list[dict] = []
+    started = asyncio.Event()
+
+    async def send(message):
+        received.append(message)
+        started.set()
+
+    task = asyncio.create_task(
+        app({"type": "lifespan", "asgi": {"version": "3.0"}}, inbox.get, send))
+    await inbox.put({"type": "lifespan.startup"})
+    await asyncio.wait_for(started.wait(), timeout=10)
+    assert received[0] == {"type": "lifespan.startup.complete"}
+
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+            headers={"Accept": "application/json, text/event-stream"},
+        )
+    assert response.status_code == 200
+    assert [t["name"] for t in response.json()["result"]["tools"]] == [
+        "search", "list_providers"]
+
+    await inbox.put({"type": "lifespan.shutdown"})
+    await asyncio.wait_for(task, timeout=10)
+    assert received[-1] == {"type": "lifespan.shutdown.complete"}
+
+
+async def test_a_get_is_refused_promptly_rather_than_held_open():
+    """GET is the transport's server-to-client SSE verb. Routed, the SDK opens
+    a stream that stateless mode never writes to and never closes, pinning a
+    connection per request — unauthenticated, when no token is configured. The
+    route must not accept the verb at all.
+    """
+    app = create_app(SETTINGS_NO_AUTH, instances=[hit("a", [])])
+    async with app.state.mcp_session_manager.run():
+        transport = httpx2.ASGITransport(app=app)
+        async with httpx2.AsyncClient(transport=transport,
+                                      base_url="http://test") as client:
+            response = await asyncio.wait_for(
+                client.get("/mcp",
+                           headers={"Accept": "application/json, text/event-stream"}),
+                timeout=10,
+            )
+    assert response.status_code == 405
+
+
+async def test_delete_still_reaches_the_mcp_layer():
+    """The companion to the GET test: dropping GET from the route must not
+    take DELETE with it. Stateless mode has no session to terminate, so the
+    answer is a refusal either way — but it comes from the MCP layer.
+    """
+    app = create_app(SETTINGS_NO_AUTH, instances=[hit("a", [])])
+    async with app.state.mcp_session_manager.run():
+        transport = httpx2.ASGITransport(app=app)
+        async with httpx2.AsyncClient(transport=transport,
+                                      base_url="http://test") as client:
+            response = await client.delete("/mcp")
+    assert response.status_code == 405
+    assert response.json()["error"]
+
+
+async def test_duplicate_authorization_headers_resolve_the_same_way_on_both_surfaces():
+    """A request carrying two Authorization headers must get the same verdict
+    from `/mcp` as from `/search`. The MCP gate reads the raw ASGI scope and
+    the HTTP gate reads Starlette's Headers; if they disagreed on which
+    duplicate wins, each would accept a request the other refuses.
+    """
+    good, bad = "Bearer s3cret", "Bearer wrong"
+    for first, second, expected in ((bad, good, 401), (good, bad, 200)):
+        headers = [(b"authorization", first.encode()), (b"authorization", second.encode())]
+        app = create_app(SETTINGS_AUTH, instances=[hit("a", [])])
+        async with app.state.mcp_session_manager.run():
+            transport = httpx2.ASGITransport(app=app)
+            async with httpx2.AsyncClient(transport=transport,
+                                          base_url="http://test") as client:
+                over_mcp = await client.post(
+                    "/mcp",
+                    json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                    headers=[(b"accept", b"application/json, text/event-stream"), *headers],
+                )
+                over_http = await client.get("/providers", headers=headers)
+        # First-wins on both: the first header decides.
+        assert over_mcp.status_code == expected
+        assert over_http.status_code == expected
 
 
 async def _raw_mcp_post(app, headers, body=None):
