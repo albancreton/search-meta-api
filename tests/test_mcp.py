@@ -197,21 +197,36 @@ async def test_list_providers_is_advertised_with_no_required_arguments():
     assert tools["list_providers"].description
 
 
-async def test_list_providers_needs_the_token_too():
+async def test_list_providers_reaches_the_tool_with_a_valid_token():
     app = create_app(SETTINGS_AUTH, instances=[hit("a", [])])
     async with mcp_session(app, token="s3cret") as session:
         result = await session.call_tool("list_providers", {})
     assert result.is_error is False
+    assert [p["name"] for p in result.structured_content["providers"]] == ["a"]
 
 
-async def _raw_mcp_post(app, headers):
+async def test_list_providers_is_refused_without_the_token():
+    """The bearer gate wraps the whole ASGI endpoint, so it must refuse a
+    `tools/call` naming this specific tool, not just the handshake.
+    """
+    app = create_app(SETTINGS_AUTH, instances=[hit("a", [])])
+    response = await _raw_mcp_post(app, {}, body={
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "list_providers", "arguments": {}},
+    })
+    assert response.status_code == 401
+
+
+async def _raw_mcp_post(app, headers, body=None):
     """POST to /mcp below the protocol layer, to observe the HTTP status."""
+    if body is None:
+        body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
     async with app.state.mcp_session_manager.run():
         transport = httpx2.ASGITransport(app=app)
         async with httpx2.AsyncClient(transport=transport,
                                       base_url="http://test") as client:
             return await client.post(
                 "/mcp",
-                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                json=body,
                 headers={"Accept": "application/json, text/event-stream", **headers},
             )
