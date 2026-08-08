@@ -345,6 +345,62 @@ records `reason: "deadline-exceeded"`, and the response's top-level
 (`200` if any provider answered, `503` if none did), never a `503` purely
 on account of the deadline.
 
+## MCP server
+
+The same service is reachable over the Model Context Protocol at
+`POST /mcp` — same container, same bearer token, same provider chain. The
+tool calls the router in-process, through the same `run_search` and
+`describe_providers` functions the HTTP routes call; there is no second
+service to deploy and no separate code path that could drift out of sync
+with the one described above.
+
+Register it with any client that speaks remote MCP over streamable HTTP:
+
+```bash
+claude mcp add --transport http search https://search.local.alban.me/mcp \
+  --header "Authorization: Bearer <your token>"
+```
+
+Drop the `--header` if `server.auth_token` is unset — `/mcp` is then open,
+exactly as `/search` and `/providers` are.
+
+**The URL has no trailing slash.** `/mcp` is the endpoint; `/mcp/` is not.
+That's deliberate, not an oversight: the endpoint is built as a route
+rather than mounted as a sub-app, because mounting would put it at `/mcp/`
+and answer `/mcp` itself with a redirect — and the MCP SDK's own client
+never follows redirects, so a client configured with the natural URL would
+fail outright instead of being bounced to the right place.
+
+Two tools:
+
+- **`search`** — the same flat, typed parameters as `POST /search`,
+  including the scoped `params` map, returning the same response body.
+  `degraded` and `truncated` mean exactly what they mean over HTTP, and
+  `truncated` is worth the same attention here as there: an empty
+  `results` with `truncated: true` is not the same answer as an empty
+  `results` with `truncated: false` (see "Request examples" above for why
+  that distinction exists).
+- **`list_providers`** — the same payload as `GET /providers`, built by the
+  same function. An agent needs it before it can write a scoped param like
+  `tavily/search_depth`, and to understand why a search reported a filter
+  as `degraded`.
+
+Two differences from the HTTP surface, both in how failures arrive rather
+than what counts as one:
+
+- What would be a `422` (bad `params`) or a `503` (every provider errored)
+  on the HTTP surface instead becomes an MCP tool error on this one — MCP
+  has no status code to carry the distinction, only a single error
+  channel, so both collapse onto it. The `503` case serialises the same
+  `all_providers_failed` payload the HTTP body nests under `detail` into
+  the error text rather than dropping it, so the `attempts` array survives
+  for the agent to read.
+- Everything else is unchanged. In particular, **an empty result set stays
+  a success on both surfaces** — it comes back as a normal, non-error tool
+  result, because it's a legitimate answer, not a failure. Only a
+  validation failure and an all-providers-errored chain become MCP tool
+  errors.
+
 ## Adding a provider
 
 1. Write an adapter in `src/search_meta_api/providers/<name>.py` subclassing
